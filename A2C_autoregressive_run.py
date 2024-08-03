@@ -392,7 +392,7 @@ def run_once(path, reward_func='profit', preproc=True, timesteps=6000, v_in_coef
                               timesteps = timesteps, v_in_coef=v_in_coef,v_ex_coef=v_ex_coef, r_in_coef=r_in_coef, ent_coef=ent_coef, lr_alpha=lr_alpha, lr_beta=lr_beta,
                               rms_prop_eps=rms_prop_eps, verbose=verbose, seed=seed, turb_var=turb_var, preproc=preproc, n_steps= n_steps ,start_intrinsic_update=start_intrinsic_update)
 
-        f=  open("results/SUMMARYRESULTS.csv", 'a', newline='')
+        f=  open(f"results/autoA2C/{reward_func}/SUMMARYRESULTS.csv", 'a', newline='')
         to_append = [['SEED', seed], infos, model_use ]                 
         csvwriter = csv.writer(f)
         csvwriter.writerows(to_append)
