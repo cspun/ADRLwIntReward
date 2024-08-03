@@ -1,3 +1,5 @@
+# Non-autoregressive A2C 
+
 
 import time
 import sys
@@ -9,6 +11,8 @@ from gym import spaces
 import tensorflow as tf
 import numpy as np 
 from itertools import chain
+from statistics import mean, stdev 
+
 
 from stable_baselines import logger
 from stable_baselines.common import explained_variance, tf_util, ActorCriticRLModel, SetVerbosity, TensorboardWriter
@@ -74,7 +78,7 @@ class A2C(ActorCriticRLModel):
     :param n_cpu_tf_sess: (int) The number of threads for TensorFlow operations
         If None, the number of cpu of the current machine will be used.
     """
-    def __init__(self, policy, env, gamma=0.99, n_steps=5, #vf_coef=0.25,
+    def __init__(self, policy, env, reward_func, gamma=0.99, n_steps=5, #vf_coef=0.25,
                  v_mix_coef=0.5, v_ex_coef=1.0, r_in_coef=0.001,
                  ent_coef=0.01, max_grad_norm=0.5,
                  #learning_rate=7e-4,
@@ -85,13 +89,12 @@ class A2C(ActorCriticRLModel):
                  full_tensorboard_log=False, seed=None, n_cpu_tf_sess=None, model_type=None ):
         
         if r_in_coef > 0: 
-            print("MODEL: Non-Autoregressive A2C + Intrinsic") 
+            print("MODEL: Augmented A2C (non autoregressive)") 
         else: 
-            print("MODEL: Non-Autoregressive A2C (No Intrinsic)") 
-#use lr_alpha and lr_beta to replace learning_rate
+            print("MODEL: Baseline A2C (non autoregressive)") 
         self.n_steps = n_steps
         self.gamma = gamma
-        # avg_feature, std_feature are np.array of shape (181,) 
+        self.reward_func = reward_func 
         
         
         if preproc: #True 
@@ -180,7 +183,7 @@ class A2C(ActorCriticRLModel):
             self.setup_model()
 
     def _make_runner(self) -> AbstractEnvRunner:
-        return A2CRunner(self.env, self, n_steps=self.n_steps,r_ex_coef=self.r_ex_coef, r_in_coef=self.r_in_coef, gamma=self.gamma)
+        return A2CRunner(self.env, self.reward_func, self, n_steps=self.n_steps,r_ex_coef=self.r_ex_coef, r_in_coef=self.r_in_coef, gamma=self.gamma)
         # calling A2CRunner resets the train environment 
 
     def _get_pretrain_placeholders(self):  #not used
@@ -392,7 +395,7 @@ class A2C(ActorCriticRLModel):
                 self.summary = tf.compat.v1.summary.merge_all()
             
         
-    def _train_step(self,obs, obs_nx, states, actions, r_ex, ret_ex, v_ex, v_mix,
+    def _train_step(self,obs, obs_nx, states, actions, unclipped_actions, r_ex, ret_ex, v_ex, v_mix,
                                                          dis_v_mix_last, coef_mat, update,writer=None,update_intrinsic=True):
 
         """
@@ -420,18 +423,14 @@ class A2C(ActorCriticRLModel):
         assert cur_lr_beta is not None, "Error: the observation input array cannon be empty"
         
         
-        
-        td_map = {self.train_model.X: obs, self.A: actions, self.train_model.A_ALL: actions, self.train_model.X_NX: obs_nx,self.policy_new.X:obs,
+        td_map = {self.train_model.X: obs, self.A: unclipped_actions, self.train_model.A_ALL: actions, self.train_model.X_NX: obs_nx,self.policy_new.X:obs,
                   self.ADV_EX: advs_ex, self.RET_EX:ret_ex, self.R_EX: r_ex, self.V_MIX:v_mix, self.DIS_V_MIX_LAST:dis_v_mix_last, self.COEF_MAT:coef_mat, 
                   self.LR_ALPHA:cur_lr_alpha, self.LR_BETA:cur_lr_beta} 
-        
-        
+
        
         if states is not None:
             td_map[self.train_model.S] = states
 
-    
-        
         if update_intrinsic:
             pg_ex_loss, pg_mix_loss, value_mix_loss, value_ex_loss, policy_entropy, _, _  = self.sess.run(
                     [self.pg_ex_loss, self.pg_mix_loss, self.v_mix_loss, self.v_ex_loss, self.entropy, self.policy_train, self.intrinsic_train ], td_map) 
@@ -445,7 +444,7 @@ class A2C(ActorCriticRLModel):
         
         return pg_ex_loss, pg_mix_loss, value_mix_loss, value_ex_loss, policy_entropy 
     
-            
+        
             
 
 
@@ -470,17 +469,8 @@ class A2C(ActorCriticRLModel):
             self.eprinbuf = deque(maxlen=100)
             self.eplenbuf = deque(maxlen=100)
             callback.on_training_start(locals(), globals())
-            
-            
-    
-            
-            if total_timesteps != 1600: 
-                df= self.env.get_attr('df', indices=0)
-                df_len = len(df[0].index.unique())
-                total_timesteps = total_timesteps + (df_len - total_timesteps % df_len ) 
-                print("total timesteps: ", total_timesteps ,'epochs' , total_timesteps/df_len )
-            
 
+            
             
             
             # A2C INTRINSIC TRAINING 
@@ -489,8 +479,6 @@ class A2C(ActorCriticRLModel):
                 
                 if update % 1000 == 0: 
                     print("No. of days/ updates: ", update, "steps", update*30 )
-                
-                
                 if update < start_intrinsic_update//self.n_batch: 
                     update_intrinsic=False 
                 else: 
@@ -504,9 +492,9 @@ class A2C(ActorCriticRLModel):
                 rollout = self.runner.run(callback)
                
                        
-                obs, actions, obs_nx, states, r_in, r_ex, ret_ex, ret_mix, \
+                obs, actions, unclipped_actions, obs_nx, states, r_in, r_ex, ret_ex, ret_mix, \
                 v_ex, v_mix, last_v_ex, last_v_mix, dones, \
-                ep_info, ep_r_ex, ep_r_in, ep_len, v_mix_terminal = rollout 
+                ep_info, ep_r_ex, ep_r_in, ep_len = rollout 
                 
                 
                 if total_timesteps == 1600: 
@@ -514,27 +502,21 @@ class A2C(ActorCriticRLModel):
                     return self 
                 
         
-                
-                if True in dones: 
-                    true_index = np.where(dones)[0]
-               
                 dis_v_mix_last = np.zeros([self.n_batch], np.float32)
                 coef_mat = np.zeros([self.n_batch, self.n_batch], np.float32)
-                
-                
                 for i in range(self.n_batch):
-
-                    dis_v_mix_last[i] = self.gamma ** (self.n_steps - i % self.n_steps) * last_v_mix[i // self.n_steps] 
+                    dis_v_mix_last[i] = self.gamma ** (self.n_steps - i % self.n_steps) * last_v_mix[i // self.n_steps]
                     coef = 1.0
-                    for j in range(i, self.n_batch):  
+                    for j in range(i, self.n_batch):
                         if j > i and j % self.n_steps == 0:
                             break
                         coef_mat[i][j] = coef
                         coef *= self.gamma
                         if dones[j]:
-                            dis_v_mix_last[i] = self.gamma ** (true_index - i + 1 ) * v_mix_terminal[0] # Treat terminal obs as end-of-episode obs
-                            
+                            dis_v_mix_last[i] = 0
                             break
+                
+
                         
 
                         
@@ -549,8 +531,7 @@ class A2C(ActorCriticRLModel):
                 self.eprexbuf.extend(ep_r_ex)
                 self.eplenbuf.extend(ep_len)
                 
-                
-                pg_ex_loss, pg_mix_loss, value_mix_loss, value_ex_loss, policy_entropy  = self._train_step(obs, obs_nx, states, actions, r_ex, ret_ex, v_ex, v_mix,
+                pg_ex_loss, pg_mix_loss, value_mix_loss, value_ex_loss, policy_entropy  = self._train_step(obs, obs_nx, states, actions,unclipped_actions, r_ex, ret_ex, v_ex, v_mix,
                                                                  dis_v_mix_last, coef_mat, self.num_timesteps // self.n_batch, writer,update_intrinsic)
                 
                 
@@ -560,16 +541,6 @@ class A2C(ActorCriticRLModel):
                 
                 intrinsic_loss = pg_ex_loss + self.v_ex_coef * value_ex_loss
                 
-                
-                if update % 500 == 0:
-                    f = open(f"/Users/magdalenelim/Desktop/FYP/results/{self.model_type}_loss.csv", 'a', newline='')
-                    
-                    to_append_ = [['update', 'pg_mix_loss','pg_ex_loss', 'v_mix_loss', 'value_ex_loss', 'policy_entropy', 'policy_loss', 'intrinsic_loss','r_in', 'r_ex', 'last_v_mix', 'last_v_ex', 'ret_mix', 'ret_ex', 'actions']]
-                    to_append = [[update, pg_mix_loss,pg_ex_loss, value_mix_loss, value_ex_loss, policy_entropy, policy_loss, intrinsic_loss ,r_in, r_ex, last_v_mix, last_v_ex, ret_mix, ret_ex, actions, v_mix_terminal]]                 
-                    csvwriter = csv.writer(f)
-                    csvwriter.writerows(to_append_)
-                    csvwriter.writerows(to_append)
-                    f.close()
                 
 
  
@@ -616,7 +587,7 @@ class A2C(ActorCriticRLModel):
 
 
 class A2CRunner(AbstractEnvRunner):
-    def __init__(self, env, model, n_steps=5,r_ex_coef=1-0.001, r_in_coef=0.001, gamma=0.99):
+    def __init__(self, env, reward_func, model, n_steps=5,r_ex_coef=1-0.001, r_in_coef=0.001, gamma=0.99):
         """
         A runner to learn the policy of an environment for an a2c model
 
@@ -628,6 +599,7 @@ class A2CRunner(AbstractEnvRunner):
         #line 162-176: needs to modify the parameters in runner; MARKED LINES TO TAKE CARE LATER
         super(A2CRunner, self).__init__(env=env, model=model, n_steps=n_steps)
         self.gamma = gamma
+        self.reward_func =reward_func 
 
         #self.batch_ob_shape = (self.n_envs*self.n_steps,) + env.observation_space.shape
         #self.obs = env.reset()
@@ -640,49 +612,130 @@ class A2CRunner(AbstractEnvRunner):
         self.ep_r_ex = np.zeros([nenv])
         self.ep_len = np.zeros([nenv])
         self.states = model.initial_state
+
+        if self.reward_func == 'csr': 
+            self.list1= deque([], maxlen=63)
+
+        if self.reward_func == 'dsr1': 
+            self.init_base_sr_dsr1() 
+
+
+        if self.reward_func =='dsr2': 
+            self.eta = 0.5 
+            self.init_base_sr_dsr2() 
+
+
+    def init_base_sr_dsr1(self): 
+        rews = [] 
+        for i in range(63): 
+            actions,_, _, _, _ = self.model.step(self.obs ) 
+            clipped_actions = np.clip(actions,  self.env.action_space.low, self.env.action_space.high)
+            self.obs, r_ex, dones, infos = self.env.step(clipped_actions) #r_ex : absolute reward 
+            rews.append(r_ex[0])
+        self.obs = self.env.reset() 
+        self.list1 = np.array(rews)  # Returns of first quarter. 
+        self.sr = np.mean(self.list1 ) / np.std(self.list1)
         
+    def init_base_sr_dsr2(self): 
+            rews = [] 
+            for i in range(63): 
+                actions,_, _, _, _ = self.model.step(self.obs ) 
+                clipped_actions = np.clip(actions,  self.env.action_space.low, self.env.action_space.high)
+                self.obs, r_ex, dones, infos = self.env.step(clipped_actions) #r_ex : absolute reward 
+                rews.append(r_ex[0])
+            self.obs = self.env.reset() 
+            self.pct = np.array(rews)  # Returns of first quarter. 
+            self.A = np.mean(self.pct )
+            self.B = np.mean (self.pct**2 )
+            self.n = len(self.pct ) 
         
-        
+
         
         
 
     def _run(self):
 
         v_mix_terminal= None 
-        mb_obs, mb_r_ex, mb_r_in, mb_actions, mb_v_ex, mb_v_mix, mb_dones = [],[],[],[],[],[],[]
+        mb_obs, mb_r_ex, mb_r_in, mb_actions, mb_v_ex, mb_v_mix, mb_dones, mb_unclipped = [],[],[],[],[],[],[], []
         mb_obs_next = []
         mb_states = self.states
         #ep_infos = []
         ep_info, ep_r_ex, ep_r_in, ep_len = [], [], [], []
         i=0 
-        while i < self.n_steps : 
+        for i in range(self.n_steps) : 
 
             actions,v_ex, v_mix, _, _ = self.model.step(self.obs) 
             mb_obs.append(np.copy(self.obs))
-            
+            mb_unclipped.append(actions)
             mb_v_mix.append(v_mix)
             mb_dones.append(self.dones)
             clipped_actions = np.clip(actions,  self.env.action_space.low, self.env.action_space.high)
             mb_actions.append(clipped_actions)
             
             
-            obs, r_ex, dones, infos = self.env.step(clipped_actions) # dones should be Bool. 
-              
-            if not dones: 
-                i+=1 
-                self.model.num_timesteps += self.n_envs 
-                
+            obs, r_ex, dones, infos = self.env.step(clipped_actions) 
+           
+           
             
-            mb_obs_next.append(obs)
-            r_in = self.model.intrinsic_reward(ob=self.obs, ac=clipped_actions, ob_nx= obs)    ###EXPAND TO INCULDE OBS_NX, obs = OBS_NX, self.obs = OBS
-            
+            for n, done in enumerate(dones): # n : which env 
+                if done:
+                    r_ex= np.array([0]) 
+                    mb_r_ex.append(r_ex)
+                    if self.reward_func == 'csr': 
+                        self.list1 = deque([], maxlen=63) 
+                    mb_obs_next.append(self.obs)
+                    r_in = self.model.intrinsic_reward(ob=self.obs, ac=clipped_actions, ob_nx= self.obs)
+                    ep_r_ex.append(self.ep_r_ex[n])
+                    ep_r_in.append(self.ep_r_in[n])
+                    ep_len.append(self.ep_len[n])
+                    self.ep_r_ex[n], self.ep_r_in[n], self.ep_len[n] = 0,0,0
+                    
+                else: 
+                    mb_obs_next.append(obs)
+                    r_in = self.model.intrinsic_reward(ob=self.obs, ac=clipped_actions, ob_nx= obs) 
+
+                    if self.reward_func in ['profit','logreturn']:
+                        mb_r_ex.append(r_ex) 
+
+                    elif self.reward_func == 'csr': 
+                        self.list1.append(float(r_ex[0]))
+                        if len(self.list1) > 1: 
+                            if stdev(self.list1) != 0: 
+                                sr = (252 ** 0.5) * mean(self.list1) / stdev(self.list1)
+                            else: # stdev returns zero ie. no trading 
+                                sr = 0 
+                        else: 
+                            sr = (252 ** 0.5) * mean(self.list1) 
+                        mb_r_ex.append( np.array([sr]) ) 
+                    
+                    elif self.reward_func == 'dsr1': 
+                        # Sharpe ratio 
+                        self.list1 = np.append( r_ex, self.list1 )
+                        new_sr = np.mean(self.list1)/np.std(self.list1)
+                        change_sr = new_sr - self.sr 
+                        self.sr = new_sr 
+                        mb_r_ex.append( np.array([change_sr*100] ) )
+
+                    elif self.reward_func == 'dsr2': 
+                        # Differential Sharpe ratio
+                        delta_A = r_ex - self.A  
+                        delta_B = r_ex**2 - self.B 
+                        Dt = (self.B*delta_A - 0.5*self.A*delta_B ) / ( (self.B- self.A**2)**(3/2))
+                        self.A = ( self.n*self.A + r_ex )/ (self.n+1)
+                        self.B = (self.n*self.B + r_ex**2 ) / (self.n+1)
+                        self.n +=1 
+                        mb_r_ex.append( Dt*self.eta  ) 
+
+    
+                    
+                    
+                    
+            self.model.num_timesteps += self.n_envs
             
             mb_v_ex.append(v_ex)
-            mb_r_ex.append(r_ex) 
             mb_r_in.append(r_in)
 
-
-
+              
 
             if self.callback is not None:
                 # Abort training early
@@ -701,46 +754,16 @@ class A2CRunner(AbstractEnvRunner):
             
             
             self.ep_len += 1
+            self.dones = dones 
+            self.obs = obs 
 
-            for n, done in enumerate(dones): # n : which env 
-                if done:
-                    v_ex_terminal, v_mix_terminal = self.model.value(self.obs)
-                    
-
-                    ep_r_ex.append(self.ep_r_ex[n])
-                    ep_r_in.append(self.ep_r_in[n])
-                    ep_len.append(self.ep_len[n])
-                    self.ep_r_ex[n], self.ep_r_in[n], self.ep_len[n] = 0,0,0
-
-
-            
-
-
-            self.dones = dones
-            self.obs =obs 
-            
+           
             
             
              
         mb_dones.append(self.dones)
-        mb_dones = mb_dones[1:]
         
         
-        if [True] in mb_dones: 
-            true_index = mb_dones.index([True])
-
-    
-            mb_obs.pop(true_index)
-            mb_actions.pop(true_index)
-            mb_obs_next.pop(true_index)
-            mb_r_ex.pop(true_index)
-            mb_r_in.pop(true_index)
-            mb_v_ex.pop(true_index)
-            mb_v_mix.pop(true_index)
-            mb_dones.pop(true_index)
-            if true_index>0: 
-                mb_dones[true_index-1] = [True]
-
         
             
         
@@ -756,38 +779,36 @@ class A2CRunner(AbstractEnvRunner):
         mb_r_mix = self.r_ex_coef * mb_r_ex + self.r_in_coef * mb_r_in
         
     
-        
+        mb_unclipped = np.asarray(mb_unclipped, dtype=self.env.action_space.dtype).swapaxes(0, 1)
         mb_actions = np.asarray(mb_actions, dtype=self.env.action_space.dtype).swapaxes(0, 1) 
         mb_v_ex = np.asarray(mb_v_ex, dtype=np.float32).swapaxes(1, 0)        
         mb_v_mix = np.asarray(mb_v_mix, dtype=np.float32).swapaxes(1, 0)
+
         mb_dones = np.asarray(mb_dones, dtype=np.bool_).swapaxes(0, 1)
+        mb_dones = mb_dones[:, 1:]
+        
         
         
       
         
         last_v_ex, last_v_mix = self.model.value(self.obs)
+        last_v_ex, last_v_mix = last_v_ex.tolist(), last_v_mix.tolist() 
         
                         
         mb_ret_ex, mb_ret_mix = np.zeros(mb_r_ex.shape), np.zeros(mb_r_mix.shape)
         
         # discount/bootstrap off value fn
-       
-        
-        
         for n, (r_ex, r_mix, dones, v_ex, v_mix) in enumerate(zip(mb_r_ex, mb_r_mix, mb_dones, last_v_ex, last_v_mix)): 
             r_ex, r_mix = r_ex.tolist(), r_mix.tolist() 
-            dones = dones.tolist() 
-            if True in dones: 
-                r_ex1 = r_ex.copy() 
-                r_mix1 = r_mix.copy()
-                r_ex1[true_index-1] = r_ex1[true_index-1] + self.gamma*v_ex_terminal[0]  
-                r_mix1[true_index-1] = r_mix1[true_index-1] + self.gamma*v_mix_terminal[0]
-                ret_ex = discount_with_dones(r_ex1 + [v_ex], dones + [0], self.gamma)[:-1] 
-                ret_mix = discount_with_dones(r_mix1 + [v_mix], dones + [0], self.gamma)[:-1]
-            else: 
-                ret_ex = discount_with_dones(r_ex + [v_ex], dones + [0], self.gamma)[:-1] 
+            dones = dones.tolist() #[False, False, False, False, False]
+            
+            if dones[-1] == 0: # last state Not terminal. 
+                ret_ex = discount_with_dones(r_ex + [v_ex], dones + [0], self.gamma)[:-1]
                 ret_mix = discount_with_dones(r_mix + [v_mix], dones + [0], self.gamma)[:-1]
-         
+
+            else: # last state terminal. 
+                ret_ex = discount_with_dones(r_ex, dones, self.gamma)
+                ret_mix = discount_with_dones(r_mix, dones, self.gamma)
             
             mb_ret_ex[n], mb_ret_mix[n] = ret_ex, ret_mix
             
@@ -799,6 +820,7 @@ class A2CRunner(AbstractEnvRunner):
         mb_ret_ex = mb_ret_ex.flatten()
         mb_ret_mix = mb_ret_mix.flatten()
         mb_actions = mb_actions.reshape(-1, *mb_actions.shape[2:])
+        mb_unclipped = mb_unclipped.reshape(-1, *mb_unclipped.shape[2:])
         mb_v_ex = mb_v_ex.reshape(-1, *mb_v_ex.shape[2:])
         mb_v_mix = mb_v_mix.reshape(-1, *mb_v_mix.shape[2:])
         mb_dones = mb_dones.flatten()
@@ -806,7 +828,7 @@ class A2CRunner(AbstractEnvRunner):
         
 
         
-        return mb_obs, mb_actions, mb_obs_nx, mb_states,mb_r_in, mb_r_ex, mb_ret_ex, mb_ret_mix, \
+        return mb_obs, mb_actions,mb_unclipped, mb_obs_nx, mb_states,mb_r_in, mb_r_ex, mb_ret_ex, mb_ret_mix, \
                mb_v_ex, mb_v_mix, last_v_ex, last_v_mix, mb_dones, \
-               ep_info, ep_r_ex, ep_r_in, ep_len ,v_mix_terminal
+               ep_info, ep_r_ex, ep_r_in, ep_len
         

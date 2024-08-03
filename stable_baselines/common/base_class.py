@@ -859,6 +859,16 @@ class ActorCriticRLModel(BaseRLModel):
 
         return clipped_actions, states
     
+    def predict_intrinsic_autoregressive(self, observation, state=None, mask=None, deterministic=False):
+
+        action_ph = np.zeros(shape=(1,30)) # Reset action placeholder before starting actions 1-30 
+        for j in range(30): 
+            input_ = np.concatenate(( np.copy(observation) , action_ph), axis=1 ).reshape((1,211)) # (1,182)
+            new_action, _, _, _, _ = self.step(input_ )
+            new_action = np.clip(new_action,  -1, 1) # (1,1)
+            action_ph[0,j] = new_action
+        return action_ph 
+    
     
     
     

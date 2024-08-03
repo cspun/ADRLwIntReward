@@ -754,7 +754,7 @@ class MlpPolicyIntrinsicInnovationReward(object):
             X_NX = tf.compat.v1.placeholder(tf.float32, (None,) + ob_space.shape, name='Ob_all') #obs  (None ,181)
             X_NX_preproc = (X_NX - addition) * multiplier 
             A_ALL = tf.compat.v1.placeholder(tf.float32, [None, actdim], name='Ac_all')
-            A_ALL_multiplier = tf.compat.v1.constant(10, dtype=tf.float32, shape=[nbatch,actdim]) 
+            A_ALL_multiplier = tf.compat.v1.constant(5, dtype=tf.float32, shape=[nbatch,actdim]) 
             A_ALL_preproc = A_ALL * A_ALL_multiplier 
             
             INPUT = tf.concat([X_preproc, A_ALL_preproc, X_NX_preproc], axis=1)
@@ -811,7 +811,6 @@ class MlpPolicyIntrinsicInnovationReward(object):
             return sess.run(self.policy_proba, {self.obs_ph: ob})
 
         self.X = X
-        self.X_preproc = X_preproc
         self.X_NX = X_NX
         self.A_ALL = A_ALL
         self.pi = pi
@@ -826,111 +825,6 @@ class MlpPolicyIntrinsicInnovationReward(object):
         self.intrinsic_params = tf.compat.v1.trainable_variables("intrinsic")
         self.policy_new_fn = MlpPolicyNewInnovation
     
-
-
-class MlpPolicyIntrinsicInnovationReward_PPO(object):
-    def __init__(self, sess, ob_space, ac_space, nbatch, nsteps, avg_feature, std_feature, reuse=False): #pylint: disable=W0613
-        ob_shape = (nbatch,) + ob_space.shape 
-        "step model: (1, 181)     train_model: (5,181) "
-        actdim = ac_space.shape[0] #30 
-        addition = tf.compat.v1.constant(avg_feature, dtype=tf.float32, name='addition')  # (nbatch, 181) = (1, 181) or (5,181) 
-        multiplier = tf.compat.v1.constant(std_feature, dtype=tf.float32, name='multiplier')
-        X = tf.compat.v1.placeholder(tf.float32, ob_shape, name='Ob')  # obs
-        X_preproc = (X - addition) * multiplier 
-        
-        
-        #print("shape of X:", X)
-        
-
-        with tf.compat.v1.variable_scope('policy', reuse=reuse):
-            
-            activ = tf.tanh
-            
-            logstd = tf.compat.v1.get_variable(name="logstd", shape=[1, actdim], initializer=tf.zeros_initializer()) # trainable. 
-            
-            h1 = activ(fc(X_preproc, 'v_mix_fc1', nh=64, init_scale=np.sqrt(2)))
-            h2 = activ(fc(h1, 'v_mix_fc2', nh=64, init_scale=np.sqrt(2)))
-            v_mix0 = fc(h2, 'v_mix', 1)[:,0]
-            
-            h1 = activ(fc(X_preproc, 'pi_fc1', nh=64, init_scale=np.sqrt(2)))
-            h2 = activ(fc(h1, 'pi_fc2', nh=64, init_scale=np.sqrt(2)))
-            pi = fc(h2, 'pi', actdim, init_scale=0.01) # length 30.  Determines action for each of the 30 stocks.
-            
-        with tf.compat.v1.variable_scope('intrinsic', reuse=reuse):
-            X_ALL = tf.compat.v1.placeholder(tf.float32, (None,) + ob_space.shape, name='Ob_all') # (nsteos, 181) = (1 , 181 )  or (20,181 )
-            addition_all = tf.tile(addition, [nsteps//nbatch , 1])
-            multiplier_all = tf.tile(multiplier, [nsteps//nbatch , 1])
-            X_ALL_preproc = (X_ALL - addition_all )*multiplier_all 
-            
-            A_ALL = tf.compat.v1.placeholder(tf.float32, [None, actdim], name='Ac_all') # 
-            A_ALL_multiplier = tf.compat.v1.constant(5, dtype=tf.float32, shape=[nsteps,actdim])  # (nsteos, 181) = (1 , 181 )  or (20,181 ) 
-            A_ALL_preproc = A_ALL * A_ALL_multiplier 
-            
-            X_NX = tf.compat.v1.placeholder(tf.float32, (None,) + ob_space.shape, name='Ob_nx') # (nsteos, 181) = (1 , 181 )  or (20,181 ) 
-            X_NX_preproc = (X_NX - addition_all) * multiplier_all 
-            
-            
-            INPUT = tf.concat([X_ALL_preproc, A_ALL_preproc, X_NX_preproc], axis=1)
-            activ = tf.tanh
-            h1 = activ(fc(X_preproc, 'v_ex_fc1', nh=64, init_scale=np.sqrt(2)))
-            h2 = activ(fc(h1, 'v_ex_fc2', nh=64, init_scale=np.sqrt(2)))
-            v_ex0 = fc(h2, 'v_ex', 1)[:,0]
-            
-            h1_ = activ(fc(INPUT, 'intrinsic_fc1', nh=64, init_scale=np.sqrt(2)))
-            #h1 = activ(fc(X, 'intrinsic_fc1', nh=64, init_scale=np.sqrt(2)))
-            h2_ = activ(fc(h1_, 'intrinsic_fc2', nh=64, init_scale=np.sqrt(2)))
-            r_in0 = tf.tanh(fc(h2_, 'r_in', 1))[:,0]    #r_in(s,a): estimated by eta, here the params eta refers to this layer of NN
-            
-
-        pdparam = tf.concat([pi, pi * 0.0 + logstd], axis=1) #length 60
-
-        self.pdtype = make_proba_dist_type(ac_space) #<stable_baselines.common.distributions.DiagGaussianProbabilityDistributionType object >
-
-        self.pd = self.pdtype.proba_distribution_from_flat(pdparam) # make_stochastic_policy(pdparam)
-
-        a0 = self.pd.sample() # sample from pd of pi
-        #print("a0:", a0)
-        neglogp0 = self.pd.neglogp(a0) 
-        self.initial_state = None
-        
-        def test(ob): 
-            logstd_, pi_, pdparam_, a0_, neglogp0_ =sess.run([logstd, pi, pdparam, a0, neglogp0],{X:ob})
-            return logstd_, pi_, pdparam_, a0_, neglogp0_
-
-        def step(ob, *_args, **_kwargs):
-            a, v_ex, v_mix, neglogp = sess.run([a0, v_ex0, v_mix0, neglogp0], {X:ob})
-            return a, v_ex, v_mix, self.initial_state, neglogp
-
-        def value(ob, *_args, **_kwargs):
-            v_ex, v_mix = sess.run([v_ex0, v_mix0], {X:ob})
-            return v_ex, v_mix
-
-        def intrinsic_reward(ob, ac, ob_nx = None, *_args, **_kwargs):    
-            r_in = sess.run(r_in0, {X_ALL:ob, A_ALL:ac, X_NX:ob_nx})    
-            return r_in
-
-        def proba_step(ob, state=None, mask=None):
-            print("PROBA STEP RAN.")
-            return sess.run(self.policy_proba, {self.obs_ph: ob})
-
-        self.X = X
-        self.X_preproc = X_preproc
-        self.X_ALL = X_ALL 
-        self.X_NX = X_NX
-        self.A_ALL = A_ALL
-        self.pi = pi
-        self.v_ex = v_ex0
-        self.r_in = r_in0
-        self.v_mix = v_mix0
-        self.step = step
-        self.value = value
-        self.test= test 
-        self.intrinsic_reward = intrinsic_reward
-        self.policy_params = tf.compat.v1.trainable_variables("policy")
-        self.intrinsic_params = tf.compat.v1.trainable_variables("intrinsic")
-        self.policy_new_fn = MlpPolicyNewInnovation
-    
-
 
 
 
@@ -966,250 +860,6 @@ class MlpPolicyNewInnovation(object):
 
 
 
-def batch_to_seq(h, nbatch, nsteps, flat=False):
-    if flat:
-        h = tf.reshape(h, [nbatch, nsteps])
-    else:
-        h = tf.reshape(h, [nbatch, nsteps, -1]) 
-    # Squeeze each tensor along the time step dimension
-    # This removes the time step dimension from each tensor
-    # resulting in a list of tensors, each representing a time step
-    return [tf.squeeze(v, [1]) for v in tf.split(axis=1, num_or_size_splits=nsteps, value=h)]
-
-def seq_to_batch(h, flat = False):
-    shape = h[0].get_shape().as_list()
-    if not flat:
-        assert(len(shape) > 1)
-        nh = h[0].get_shape()[-1]        
-        return tf.reshape(tf.concat(axis=1, values=h), [-1, nh])
-    else:
-        return tf.reshape(tf.stack(values=h, axis=1), [-1])
-
-
-def ortho_init(scale=1.0):
-    def _ortho_init(shape, dtype, partition_info=None):
-        #lasagne ortho init for tf
-        shape = tuple(shape)
-        if len(shape) == 2:
-            flat_shape = shape
-        elif len(shape) == 4: # assumes NHWC
-            flat_shape = (np.prod(shape[:-1]), shape[-1])
-        else:
-            raise NotImplementedError
-        a = np.random.normal(0.0, 1.0, flat_shape)
-        u, _, v = np.linalg.svd(a, full_matrices=False)
-        q = u if u.shape == flat_shape else v # pick the one with the correct shape
-        q = q.reshape(shape)
-        return (scale * q[:shape[0], :shape[1]]).astype(np.float32)
-    return _ortho_init
-
-
-
-
-
-########################################################################################################################
-# Intrinsic Reward Policy for Autoregressive with LSTM 
-########################################################################################################################
-
-class MlpPolicyIntrinsicInnovationReward_auto_R(object): #MlpPolicyIntrinsicInnovationReward_v6_1
-    def __init__(self, sess, ob_space, ac_space, nbatch, nsteps, avg_feature, std_feature, nlstm=30,reuse=False): 
-        nenv = nbatch // nsteps
-        ob_shape = (nsteps, 182) 
-        actdim = 1
-        self.pdtype = make_proba_dist_type(ac_space)
-        
-                
-        M = tf.compat.v1.placeholder(tf.float32, [nbatch], name='Mask')
-        X = tf.compat.v1.placeholder(tf.float32, ob_shape, name='Ob')  # INPUT: (State, Prev_action) 
-        
-        
-        
-        addition = tf.compat.v1.constant(avg_feature, dtype=tf.float32, name='addition')  
-        multiplier = tf.compat.v1.constant(std_feature, dtype=tf.float32, name='multiplier')
-        X_preproc = (X - addition) * multiplier 
-        xs = batch_to_seq(X_preproc, nenv, nsteps)         
-        ms = batch_to_seq(M, nenv, nsteps )
-        
-
-        def lstm(xs, ms, s, scope, nh, init_scale=np.sqrt(2)): # xs: list of len (nsteps*30). each item (1,182) # ms: list of len (nsteps*30). each item (1,1). s: hidden state. shape ()
-            nbatch, nin = [v for v in xs[0].get_shape()] # (1, 182 )     
-            with tf.compat.v1.variable_scope(scope):
-                wx = tf.compat.v1.get_variable("wx", [nin, nh*4], initializer=ortho_init(init_scale)) 
-                wh = tf.compat.v1.get_variable("wh", [nh, nh*4], initializer=ortho_init(init_scale)) 
-                b = tf.compat.v1.get_variable("b", [nh*4], initializer=tf.constant_initializer(0.0))
-            c, h = tf.split(axis=1, num_or_size_splits=2, value=s) 
-            for idx, (x, m) in enumerate(zip(xs, ms)): #idx: each timestep    # x: (1,182)   # m: (1,1)
-                c = c*(1-m) 
-                h = h*(1-m) 
-                z = tf.matmul(x, wx) + tf.matmul(h, wh) + b 
-                i, f, o, u = tf.split(axis=1, num_or_size_splits=4, value=z)
-                i = tf.nn.sigmoid(i) 
-                f = tf.nn.sigmoid(f) 
-                o = tf.nn.sigmoid(o) 
-                u = tf.tanh(u) 
-                c = f*c + i*u 
-                h = o*tf.tanh(c) 
-                xs[idx] = h
-            s = tf.concat(axis=1, values=[c, h])
-            return xs, s
-         
-        
-        with tf.compat.v1.variable_scope('policy', reuse=reuse):
-            S = tf.compat.v1.placeholder(tf.float32, [nenv, nlstm*2], name='State') # hidden state 
-            logstd = tf.compat.v1.get_variable(name="logstd", shape=[1, 1], initializer=tf.zeros_initializer())
-            activ = tf.tanh
-            rnn_output, snew = lstm(xs, ms, S, 'lstm1', nh=nlstm)  #rnn_output: list of len nsteps. each item (1,2*nh). snew: final state. 
-            rnn_output = seq_to_batch(rnn_output) 
-            h1 = activ(fc(rnn_output, 'pi_fc1', nh=64, init_scale=np.sqrt(2)))
-            pi = fc(h1, 'pi', actdim, init_scale=0.01) 
-            
-            S_vf = tf.compat.v1.placeholder(tf.float32, [nenv, nlstm*2], name='State_vf') # hidden state 
-            rnn_output_, snew_vf = lstm(xs, ms, S_vf, 'lstm2', nh=nlstm)  #rnn_output: list of len nsteps. each item (1,2*nh). snew: final state. 
-            rnn_output_ = seq_to_batch(rnn_output_) # (nsteps, 2*nh)
-            h1 = activ(fc(rnn_output_, 'v_mix_fc1', nh=64, init_scale=np.sqrt(2)))
-            v_mix0 = fc(h1, 'v_mix', 1)[:,0]
-            h1 = activ(fc(rnn_output_, 'v_ex_fc1', nh=64, init_scale=np.sqrt(2)))
-            v_ex0 = fc(h1, 'v_ex', 1)[:,0]
-           
-                
-        with tf.compat.v1.variable_scope('intrinsic', reuse=reuse):
-            activ = tf.tanh
-            X_NX = tf.compat.v1.placeholder(tf.float32, ob_shape , name='Ob_all') # (none , 211) Next_state
-            X_NX_preproc =( X_NX - addition ) *  multiplier 
-            A_ALL = tf.compat.v1.placeholder(tf.float32, [None, actdim], name='Ac_all')  # Recent action. 
-            INPUT = tf.concat([X_preproc, 5*A_ALL, X_NX_preproc], axis=1)
-        
-            S_r_in = tf.compat.v1.placeholder(tf.float32, [nenv, nlstm*2], name='State_rin') # hidden state 
-
-            
-            xs_r_in = batch_to_seq(INPUT, nenv, nsteps) # list of len nsteps . each item (1,183)
-            ms_r_in = batch_to_seq(M, nenv, nsteps) 
-            rnn_output, snew_rin = lstm(xs_r_in, ms_r_in, S_r_in, 'lstm_r_in', nh=nlstm)  
-            rnn_output = seq_to_batch(rnn_output) # (nsteps, 2nh)
-            
-            h1 = activ(fc(rnn_output, 'intrinsic_fc1', nh=64, init_scale=np.sqrt(2)))
-            r_in0 = tf.tanh(fc(h1, 'r_in', 1))[:,0] 
-            
-            
-   
-            
-        pdparam = tf.concat([pi, pi * 0.0 + logstd], axis=1)
-        self.pd = self.pdtype.proba_distribution_from_flat(pdparam)
-        a0 = self.pd.sample()
-        a0 = tf.compat.v1.clip_by_value(a0, clip_value_min=-1, clip_value_max=1)
-        neglogp0 = self.pd.neglogp(a0)
-    
-        self.initial_state = np.zeros((nenv, nlstm*2), dtype=np.float32)
-        
-        
-
-        def step(ob, state ,s_vf, mask ): # Ob : (S_t , a_{t-1} ) 
-            a, v_ex, v_mix, snew_, s_vf_new, neglogp = sess.run([a0, v_ex0, v_mix0, snew,snew_vf, neglogp0], {X:ob, S:state,S_vf:s_vf, M:mask})
-            
-            
-            return a, v_ex, v_mix, snew_, s_vf_new, neglogp
-
-        def value(ob, s, s_vf, mask):
-            v_ex, v_mix,s_vf_new = sess.run([v_ex0, v_mix0, snew_vf ], {X:ob, S:s ,S_vf:s_vf, M:mask}) 
-            
-            
-            return v_ex, v_mix,s_vf_new
-
-        def intrinsic_reward(ob, ac, state, mask , ob_nx = None, *_args, **_kwargs):    ###INPUT INCLUDE OB_NX 
-            r_in ,snew_rin_ = sess.run([r_in0 , snew_rin ], {X:ob, A_ALL:ac, X_NX:ob_nx,S_r_in:state , M:mask })    ###CODE TO EXPEND AND INCLUDE X_NX
-            return r_in, snew_rin_ 
-        
-        
-        
-
-        def proba_step(ob, state=None, mask=None):
-            return sess.run(self.policy_proba, {self.obs_ph: ob})
-
-        self.X = X
-        self.A_ALL = A_ALL
-        self.pi = pi
-        self.v_ex = v_ex0
-        self.r_in = r_in0
-        self.M = M 
-        self.S = S 
-        self.S_vf =S_vf 
-        self.X_NX = X_NX
-        self.S_r_in = S_r_in 
-        self.v_mix = v_mix0
-        self.step = step
-        self.value = value
-        self.intrinsic_reward = intrinsic_reward
-        self.policy_params = tf.compat.v1.trainable_variables("policy")
-        self.intrinsic_params = tf.compat.v1.trainable_variables("intrinsic")
-        self.policy_new_fn = MlpPolicyNewInnovation_auto_R #MlpPolicyNewInnovation_v6_1
-        
-
-
-
-
-class MlpPolicyNewInnovation_auto_R(object):
-    def __init__(self, params, ob_space, ac_space, nbatch, nsteps, avg_feature, std_feature,nlstm=30): #pylint: disable=W0613
-        "avg_feature, std_feature: (n_steps, 181) array "
-        nenv = nbatch // nsteps
-        ob_shape = (nsteps, 182) # (1,182) or (30,182) 
-        actdim = 1
-        self.pdtype = make_proba_dist_type(ac_space)
-        
-                
-        M = tf.compat.v1.placeholder(tf.float32, [nbatch], name='Mask')
-        X = tf.compat.v1.placeholder(tf.float32, ob_shape, name='Ob')  # INPUT: (State, Prev_action) 
-        S = tf.compat.v1.placeholder(tf.float32, [nenv, nlstm*2], name='State') # hidden state 
-        
-        
-        
-        addition = tf.compat.v1.constant(avg_feature, dtype=tf.float32, name='addition')  #tensor shape (nsteps, 182)
-        multiplier = tf.compat.v1.constant(std_feature, dtype=tf.float32, name='multiplier')
-        X_preproc = (X - addition) * multiplier 
-        xs = batch_to_seq(X_preproc, nenv, nsteps) # list of len nsteps . each item (1,182)
-        ms = batch_to_seq(M, nenv, nsteps )
-        #print("shape of X:", X)
-    
-    
-        def lstm(xs, ms, s, scope, nh, init_scale=np.sqrt(2)): # xs: list of len (nsteps*30). each item (1,182) # ms: list of len (nsteps*30). each item (1,1). s: hidden state. shape ()
-            nbatch, nin = [v for v in xs[0].get_shape()] # (1, 182 )     
-            with tf.compat.v1.variable_scope(scope):
-                wx = params['policy/lstm1/wx:0']
-                wh = params['policy/lstm1/wh:0']
-                b = params['policy/lstm1/b:0']
-            c, h = tf.split(axis=1, num_or_size_splits=2, value=s) 
-            for idx, (x, m) in enumerate(zip(xs, ms)): #idx: each timestep    # x: (1,182)   # m: (1,1)
-                c = c*(1-m) 
-                h = h*(1-m)                 
-                z = tf.matmul(x, wx) + tf.matmul(h, wh) + b 
-                i, f, o, u = tf.split(axis=1, num_or_size_splits=4, value=z)
-                i = tf.nn.sigmoid(i) 
-                f = tf.nn.sigmoid(f) 
-                o = tf.nn.sigmoid(o) 
-                u = tf.tanh(u) 
-                c = f*c + i*u 
-                h = o*tf.tanh(c) 
-                xs[idx] = h
-            s = tf.concat(axis=1, values=[c, h])
-            return xs, s
-    
-    
-        with tf.name_scope('policy_new'):
-            activ = tf.tanh
-            logstd = params['policy/logstd:0']
-            rnn_output, snew = lstm(xs, ms, S, 'lstm1', nh=nlstm)  #rnn_output: list of len nsteps. each item (1,2*nh). snew: final state. 
-            rnn_output = seq_to_batch(rnn_output) # (nsteps, 2*nh)
-            h1 = activ(tf.compat.v1.nn.xw_plus_b(rnn_output, params['policy/pi_fc1/w:0'], params['policy/pi_fc1/b:0']))
-            pi = tf.compat.v1.nn.xw_plus_b(h1, params['policy/pi/w:0'], params['policy/pi/b:0'])
-            
-            
-        pdparam = tf.concat([pi, pi * 0.0 + logstd], axis=1)
-        self.pd = self.pdtype.proba_distribution_from_flat(pdparam)
-                
-        
-        self.X = X
-        self.M=M
-        self.S = S
-
 
 
 
@@ -1217,7 +867,7 @@ class MlpPolicyNewInnovation_auto_R(object):
 # Intrinsic Reward Policy for Autoregressive with FNN 
 ########################################################################################################################
 
-class MlpPolicyIntrinsicInnovationReward_auto_F(object):
+class MlpPolicyIntrinsicInnovationReward_auto(object):
     def __init__(self, sess, ob_space, ac_space, nbatch, nsteps, avg_feature, std_feature,reuse=False): 
         nenv = nbatch // nsteps        
         ob_shape = (nsteps, 211) # 181+30 
@@ -1265,7 +915,6 @@ class MlpPolicyIntrinsicInnovationReward_auto_F(object):
         self.pdtype = make_proba_dist_type(ac_space)
         self.pd = self.pdtype.proba_distribution_from_flat(pdparam)
         a0 = self.pd.sample()
-        a0 = tf.compat.v1.clip_by_value(a0, clip_value_min=-1, clip_value_max=1)
         neglogp0 = self.pd.neglogp(a0)
         
             
@@ -1308,11 +957,12 @@ class MlpPolicyIntrinsicInnovationReward_auto_F(object):
         self.r_in = r_in0
         self.v_mix = v_mix0
         self.step = step
+        self.pdparam = pdparam 
         self.value = value
         self.intrinsic_reward = intrinsic_reward
         self.policy_params = tf.compat.v1.trainable_variables("policy")
         self.intrinsic_params = tf.compat.v1.trainable_variables("intrinsic")
-        self.policy_new_fn = MlpPolicyNewInnovation_auto_F
+        self.policy_new_fn = MlpPolicyNewInnovation_auto_F 
 
 
 class MlpPolicyNewInnovation_auto_F(object):
@@ -1341,6 +991,66 @@ class MlpPolicyNewInnovation_auto_F(object):
 
 
 
+class MlpPolicyIntrinsicInnovationReward_auto_org(object): 
+    # Baseline variant of MlpPolicyIntrinsicInnovationReward_auto 
+    # no intrinsic rewards 
+
+    def __init__(self, sess, ob_space, ac_space, nbatch, nsteps, avg_feature, std_feature, nlstm=25,reuse=False): 
+        " nsteps. 1 or 5 . . "
+        nenv = nbatch // nsteps
+        # OLD: ob_shape = (nbatch,) + ob_space.shape #(5,181)  
+        ob_shape = (nsteps, 211) 
+        actdim = 1
+        X = tf.compat.v1.placeholder(tf.float32, ob_shape, name='Ob')  # INPUT: (State, 30 Actions ) 
+        addition = tf.compat.v1.constant(avg_feature, dtype=tf.float32, name='addition')  #tensor shape (nsteps, 182)
+        multiplier = tf.compat.v1.constant(std_feature, dtype=tf.float32, name='multiplier')
+        X_preproc = (X - addition) * multiplier 
+        
+        
+        with tf.compat.v1.variable_scope('policy', reuse=reuse):
+            activ = tf.tanh
+            logstd = tf.compat.v1.get_variable(name="logstd", shape=[1, actdim], initializer=tf.zeros_initializer())
+            
+            h1 = activ(fc(X_preproc, 'pi_fc1', nh=64, init_scale=np.sqrt(2)))
+            h2 = activ(fc(h1, 'pi_fc2', nh=64, init_scale=np.sqrt(2)))
+            pi = fc(h2, 'pi', actdim, init_scale=0.01)
+            
+        with tf.compat.v1.variable_scope('value', reuse=reuse):
+            activ = tf.tanh
+            h1 = activ(fc(X_preproc , 'v_ex_fc1', nh=64, init_scale=np.sqrt(2)))
+            h2 = activ(fc(h1, 'v_ex_fc2', nh=64, init_scale=np.sqrt(2)))
+            v_ex0 = fc(h2, 'v_ex', 1)[:,0]
+        
+        pdparam = tf.concat([pi, pi * 0.0 + logstd], axis=1)
+        self.pdtype = make_proba_dist_type(ac_space)
+        self.pd = self.pdtype.proba_distribution_from_flat(pdparam)
+        a0 = self.pd.sample()
+        neglogp0 = self.pd.neglogp(a0)          
+        self.initial_state = None 
+
+        def step(ob, *_args, **_kwargs):
+            a, v_ex, neglogp = sess.run([a0, v_ex0, neglogp0], {X:ob})
+            
+            return a, v_ex, None, self.initial_state, neglogp
+
+            
+        def value(ob, *_args, **_kwargs):
+            v_ex, _ = sess.run([v_ex0, X_preproc], {X:ob})
+            return v_ex, None 
+        
+        
+        def proba_step(ob, state=None, mask=None):
+            return sess.run(self.policy_proba, {self.obs_ph: ob})
+
+
+        self.X = X
+        self.pi = pi
+        self.v_ex = v_ex0
+     
+        self.step = step
+        self.value = value
+        self.policy_params = tf.compat.v1.trainable_variables("policy")
+
 
 
 
@@ -1354,8 +1064,8 @@ _policy_registry = {
         "MlpLstmPolicy": MlpLstmPolicy,
         "MlpLnLstmPolicy": MlpLnLstmPolicy,
         "MlpPolicyIntrinsicInnovationReward": MlpPolicyIntrinsicInnovationReward,  
-        "MlpPolicyIntrinsicInnovationReward_auto_F": MlpPolicyIntrinsicInnovationReward_auto_F, 
-        "MlpPolicyIntrinsicInnovationReward_auto_R": MlpPolicyIntrinsicInnovationReward_auto_R
+        "MlpPolicyIntrinsicInnovationReward_auto": MlpPolicyIntrinsicInnovationReward_auto,
+        "MlpPolicyIntrinsicInnovationReward_auto_org": MlpPolicyIntrinsicInnovationReward_auto_org 
     }
 }
 

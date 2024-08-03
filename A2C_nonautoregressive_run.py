@@ -9,15 +9,15 @@ from gym.utils import seeding
 import time
 import csv    
 import sys 
-sys.path.append("/Users/magdalenelim/Desktop/FYP")
 
 
 
 
-from stable_baselines import A2C
 
-from stable_baselines.common.policies import MlpPolicy, MlpLstmPolicy, MlpLnLstmPolicy, CnnPolicy
-from stable_baselines.common.noise import NormalActionNoise, OrnsteinUhlenbeckActionNoise, AdaptiveParamNoiseSpec
+
+from stable_baselines import A2C 
+
+
 from stable_baselines.common.vec_env import DummyVecEnv
 from preprocessing.preprocessors import *
 from config import config
@@ -45,12 +45,12 @@ def metrics(value):
 
 
 
-def train_A2C_intrinsic(env_train, model_name, timesteps, v_mix_coef, r_in_coef, v_ex_coef, ent_coef, lr_alpha, lr_beta, rms_prop_eps, verbose, seed,preproc, n_steps,start_intrinsic_update):
+def train_A2C_intrinsic(env_train, reward_func, model_name, timesteps, v_mix_coef , r_in_coef, v_ex_coef, ent_coef, lr_alpha, lr_beta, rms_prop_eps, verbose, seed,preproc, n_steps,start_intrinsic_update):
     start = time.time()
     
     if preproc:
         
-            preproc_ = A2C('MlpPolicyIntrinsicInnovationReward', env_train, v_mix_coef=v_mix_coef, v_ex_coef=v_ex_coef, r_in_coef=r_in_coef, ent_coef=ent_coef,
+            preproc_ = A2C('MlpPolicyIntrinsicInnovationReward', env_train, reward_func = reward_func, v_mix_coef=v_mix_coef, v_ex_coef=v_ex_coef, r_in_coef=r_in_coef, ent_coef=ent_coef,
                         lr_alpha=lr_alpha, lr_beta=lr_beta, epsilon = rms_prop_eps, verbose=verbose, seed=seed, n_steps=1600, 
                         preproc=False, model_type='intrinsic')
             preproc_.learn(total_timesteps=1600)
@@ -59,7 +59,7 @@ def train_A2C_intrinsic(env_train, model_name, timesteps, v_mix_coef, r_in_coef,
             std_feature_ = np.array([np.std(preproc_.mb_obs[:, d]) for d in range(181)])
             std_feature = np.array(1/(1 + std_feature_), dtype=np.float64) 
             
-    model = A2C('MlpPolicyIntrinsicInnovationReward', env_train, v_mix_coef=v_mix_coef, v_ex_coef=v_ex_coef, r_in_coef=r_in_coef, ent_coef=ent_coef,
+    model = A2C('MlpPolicyIntrinsicInnovationReward', env_train, reward_func=reward_func, v_mix_coef=v_mix_coef, v_ex_coef=v_ex_coef, r_in_coef=r_in_coef, ent_coef=ent_coef,
                 lr_alpha=lr_alpha, lr_beta=lr_beta, epsilon = rms_prop_eps, verbose=verbose, seed=seed, n_steps=n_steps, 
                 preproc=preproc, avg_feat=avg_feature,std_feat=std_feature, model_type='intrinsic')
     
@@ -79,11 +79,11 @@ def train_A2C_intrinsic(env_train, model_name, timesteps, v_mix_coef, r_in_coef,
 
 
 
-def train_A2C_no_intrinsic(env_train, model_name, timesteps, v_mix_coef, v_ex_coef, ent_coef, lr_alpha, lr_beta, rms_prop_eps, verbose, seed,preproc, n_steps):
+def train_A2C_no_intrinsic(env_train, reward_func, model_name, timesteps, v_mix_coef, v_ex_coef, ent_coef, lr_alpha, lr_beta, rms_prop_eps, verbose, seed,preproc, n_steps):
     start = time.time()
 
     if preproc:
-            preproc_ = A2C('MlpPolicyIntrinsicInnovationReward', env_train, v_mix_coef=v_mix_coef, v_ex_coef=v_ex_coef, r_in_coef=0, ent_coef=ent_coef,
+            preproc_ = A2C('MlpPolicyIntrinsicInnovationReward', env_train, reward_func=reward_func, v_mix_coef=v_mix_coef, v_ex_coef=v_ex_coef, r_in_coef=0, ent_coef=ent_coef,
                         lr_alpha=lr_alpha, lr_beta=lr_beta, epsilon = rms_prop_eps, verbose=verbose, seed=seed, n_steps=1600, 
                         preproc=False, model_type='original')
             preproc_.learn(total_timesteps=1600)
@@ -93,7 +93,7 @@ def train_A2C_no_intrinsic(env_train, model_name, timesteps, v_mix_coef, v_ex_co
             std_feature = np.array(1/(1 + std_feature_), dtype=np.float64) 
             
     
-    model = A2C('MlpPolicyIntrinsicInnovationReward', env_train, v_mix_coef=v_mix_coef, v_ex_coef=v_ex_coef,r_in_coef=0, ent_coef=ent_coef,
+    model = A2C('MlpPolicyIntrinsicInnovationReward', env_train, reward_func=reward_func, v_mix_coef=v_mix_coef, v_ex_coef=v_ex_coef,r_in_coef=0, ent_coef=ent_coef,
                 lr_alpha=lr_alpha, lr_beta=lr_beta, epsilon = rms_prop_eps, verbose=verbose, seed=seed, n_steps=n_steps, 
                 preproc=preproc,  avg_feat=avg_feature,std_feat=std_feature,model_type='original')
     
@@ -172,7 +172,7 @@ def get_validation_sharpe(iteration):
 
 
 
-def run_a2c_ensemble_strategy(df, unique_trade_date, rebalance_window, validation_window, timesteps,v_mix_coef, v_ex_coef, r_in_coef, ent_coef, lr_alpha, lr_beta, 
+def run_a2c_ensemble_strategy(df, reward_func, unique_trade_date, rebalance_window, validation_window, timesteps,v_mix_coef, v_ex_coef, r_in_coef, ent_coef, lr_alpha, lr_beta, 
                               rms_prop_eps, verbose, seed, turb_var, preproc, n_steps, start_intrinsic_update):
     print("============Start A2C Strategy============")
     unique_train_date = df[(df.datadate > 20081231)&(df.datadate <= 20200707)].datadate.unique()
@@ -273,7 +273,7 @@ def run_a2c_ensemble_strategy(df, unique_trade_date, rebalance_window, validatio
         print("======A2C Intrinsic Training========")     
         
         
-        model_a2c = train_A2C_intrinsic(env_train, model_name="A2CIntrinsic_{}".format(i) , timesteps=timesteps, v_mix_coef=v_mix_coef, r_in_coef=r_in_coef, v_ex_coef=v_ex_coef,
+        model_a2c = train_A2C_intrinsic(env_train, reward_func= reward_func, model_name="A2CIntrinsic_{}".format(i) , timesteps=timesteps, v_mix_coef=v_mix_coef, r_in_coef=r_in_coef, v_ex_coef=v_ex_coef,
                                                 ent_coef=ent_coef, lr_alpha = lr_alpha, lr_beta = lr_beta, rms_prop_eps=rms_prop_eps, verbose=verbose, seed=seed, preproc=preproc, n_steps=n_steps, start_intrinsic_update=start_intrinsic_update) 
         
         DRL_intrinsic_validation(model=model_a2c, test_data=validation, test_env=env_val, test_obs=obs_val)
@@ -283,7 +283,7 @@ def run_a2c_ensemble_strategy(df, unique_trade_date, rebalance_window, validatio
         print("======A2C Original Training========")
         
         env_train = DummyVecEnv([lambda: StockEnvTrain(train,preproc=True)])
-        model_a2c_org = train_A2C_no_intrinsic(env_train, model_name="A2COriginal_{}".format(i), timesteps=timesteps, v_mix_coef=v_mix_coef, v_ex_coef=v_ex_coef, 
+        model_a2c_org = train_A2C_no_intrinsic(env_train, reward_func=reward_func, model_name="A2COriginal_{}".format(i), timesteps=timesteps, v_mix_coef=v_mix_coef, v_ex_coef=v_ex_coef, 
                                                 ent_coef=ent_coef, lr_alpha = lr_alpha,lr_beta=lr_beta, rms_prop_eps=rms_prop_eps, verbose=verbose, seed=seed, preproc=preproc, n_steps=n_steps)
         
         
@@ -294,7 +294,7 @@ def run_a2c_ensemble_strategy(df, unique_trade_date, rebalance_window, validatio
         obs_val = env_val.reset()
         
         
-        _ = DRL_intrinsic_validation(model=model_a2c_org, test_data=validation, test_env=env_val, test_obs=obs_val) # NONE 
+        DRL_intrinsic_validation(model=model_a2c_org, test_data=validation, test_env=env_val, test_obs=obs_val) # NONE 
         sharpe_a2c_org = get_validation_sharpe(i) 
 
         
@@ -360,7 +360,7 @@ def run_a2c_ensemble_strategy(df, unique_trade_date, rebalance_window, validatio
     
 
     
-def run_once(path, preproc=True, timesteps=30000, v_mix_coef=0.1, v_ex_coef=1, r_in_coef=0.001, ent_coef=0.01, lr_alpha=7e-4, lr_beta=7e-4, 
+def run_once(path, reward_func='profit', preproc=True, timesteps=30000, v_mix_coef=0.1, v_ex_coef=1, r_in_coef=0.001, ent_coef=0.01, lr_alpha=7e-4, lr_beta=7e-4, 
              rms_prop_eps=1e-5, verbose=0, seed=51104, turb_var=0.9 , n_steps = 5, start_intrinsic_update=10000):
     
         preprocessed_path = path 
@@ -373,11 +373,11 @@ def run_once(path, preproc=True, timesteps=30000, v_mix_coef=0.1, v_ex_coef=1, r
     
         turbID = int(100*turb_var)
 
-        infos , model_use = run_a2c_ensemble_strategy(data, unique_trade_date, rebalance_window, validation_window,
+        infos , model_use = run_a2c_ensemble_strategy(data,reward_func, unique_trade_date, rebalance_window, validation_window,
                               timesteps = timesteps, v_mix_coef=v_mix_coef,v_ex_coef=v_ex_coef, r_in_coef=r_in_coef, ent_coef=ent_coef, lr_alpha=lr_alpha, lr_beta=lr_beta,
                               rms_prop_eps=rms_prop_eps, verbose=verbose, seed=seed, turb_var=turb_var, preproc=preproc, n_steps= n_steps ,start_intrinsic_update=start_intrinsic_update)
         
-        f=  open(f"/Users/magdalenelim/Desktop/FYP/results/SUMMARYRESULTS.csv", 'a', newline='')
+        f=  open(f"results/SUMMARYRESULTS.csv", 'a', newline='')
         to_append = [['SEED', seed], infos, model_use ]                 
         csvwriter = csv.writer(f)
         csvwriter.writerows(to_append)
@@ -387,9 +387,10 @@ def run_once(path, preproc=True, timesteps=30000, v_mix_coef=0.1, v_ex_coef=1, r
 
 
 def run(): 
-    path='/Users/magdalenelim/Desktop/FYP/done_data.csv'
-    for seed in [6280, 43136, 85721,17913,51104,35269,8182,40124,5921,3402,9391,6574,43523,10672,75927]:
-        run_once(path,seed=seed) 
+    path='done_data.csv'
+    for reward_func in ['profit','logreturn', 'csr','dsr1','dsr2']: 
+        for seed in [6280,43136,85721,17913,51104,35269,8182, 40124, 5921,7921, 9391,6574, 43523, 10672,75927, 90121, 4342]:   
+            run_once(path,reward_func = reward_func, seed=seed) 
     
 
 

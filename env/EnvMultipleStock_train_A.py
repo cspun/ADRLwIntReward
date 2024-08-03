@@ -11,8 +11,10 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import pickle
 
-
-
+#choice of reward function 
+# profit, logreturn, csr, dsr1, dsr2 
+REWARD_FUNCTION = 'profit'
+            
 # shares normalization factor
 # 100 shares per trade
 HMAX_NORMALIZE = 100
@@ -159,12 +161,18 @@ class StockEnvTrain(gym.Env):
             self.reward = end_total_asset - begin_total_asset            
             self.rewards_memory.append(self.reward)
             
-            self.reward = self.reward*REWARD_SCALING
+            if self.reward_func == 'profit': 
+                return self.state, self.reward * REWARD_SCALING , self.terminal, {}
+            
+            if self.reward_func == 'logreturn': 
+                return self.state, np.log(end_total_asset/ begin_total_asset ), self.terminal, {}
+            
+            else: # return inter-day RETURN
+                return self.state, self.reward/begin_total_asset, self.terminal, {}
             
             
 
 
-        return self.state, self.reward, self.terminal, {}
 
 
 

@@ -1,5 +1,4 @@
 
-
 import time
 import sys
 import csv
@@ -10,6 +9,8 @@ from gym import spaces
 import tensorflow as tf
 import numpy as np 
 from itertools import chain
+from statistics import mean, stdev 
+
 
 from stable_baselines import logger
 from stable_baselines.common import explained_variance, tf_util, ActorCriticRLModel, SetVerbosity, TensorboardWriter
@@ -20,8 +21,6 @@ from stable_baselines.common.tf_util import mse, total_episode_reward_logger, ca
 from stable_baselines.common.math_util import safe_mean
 
 from collections import deque
-OB_SPACE_SHAPE=181
-STOCK_DIM=30 
 
 def discount_with_dones(rewards, dones, gamma):    ## Same function with LIRPG/baselines/a2c/utils.py
     """
@@ -39,10 +38,12 @@ def discount_with_dones(rewards, dones, gamma):    ## Same function with LIRPG/b
         discounted.append(ret)
     return discounted[::-1]
 
+OB_SPACE_SHAPE=181
+STOCK_DIM=30 
 
-class A2C_autoregressive_r(ActorCriticRLModel):
+class A2C_autoregressive(ActorCriticRLModel):
     """
-    The A2C_autoregressive_r (Autoregressive Advantage Actor Critic) model class implemented using RNN 
+    The A2C_autoregressive (Autoregressive Advantage Actor Critic) model class implemented using FNN 
 
     :param policy: (ActorCriticPolicy or str) The policy model to use (MlpPolicy, CnnPolicy, CnnLstmPolicy, ...)
     :param env: (Gym environment or str) The environment to learn from (if registered in Gym, can be str)
@@ -76,36 +77,33 @@ class A2C_autoregressive_r(ActorCriticRLModel):
     :param n_cpu_tf_sess: (int) The number of threads for TensorFlow operations
         If None, the number of cpu of the current machine will be used.
     """
-    def __init__(self, policy, env, gamma=0.99, n_steps=5, 
+    def __init__(self, policy, env, reward_func, gamma=0.99, n_steps=5, #vf_coef=0.25,
                  v_in_coef=0.5, v_ex_coef=1.0, r_in_coef=0.001,
                  ent_coef=0.01, max_grad_norm=0.5,
                  #learning_rate=7e-4,
                  lr_alpha = 7e-4, lr_beta = 7e-4,
                  alpha=0.99, momentum=0.0, epsilon=1e-5, lr_schedule='constant',preproc=False, avg_feat = None, std_feat=None ,
-                 verbose=0, tensorboard_log=None, 
+                 verbose=0, tensorboard_log=None,
                  _init_setup_model=True, policy_kwargs=None,
                  full_tensorboard_log=False, seed=None, n_cpu_tf_sess=None, model_type=None ):
-        print("MODEL: a2c_RNN") 
-#use lr_alpha and lr_beta to replace learning_rate
+        print("MODEL: a2c autoregressive") 
         self.n_steps = n_steps
         self.gamma = gamma
-        # avg_feature, std_feature are np.array of shape (181,) 
         
-        
+        self.reward_func = reward_func 
         if preproc: #True 
             avg_feature = avg_feat
             std_feature = std_feat 
         else: 
-            avg_feature = np.zeros(OB_SPACE_SHAPE+1)
-            std_feature = np.ones(OB_SPACE_SHAPE+1)
+            avg_feature = np.zeros(OB_SPACE_SHAPE+30)
+            std_feature = np.ones(OB_SPACE_SHAPE+30)
         
+            
+        self.avg_feature = np.reshape(avg_feature, (1, OB_SPACE_SHAPE+30)) 
+        self.std_feature = np.reshape(std_feature,(1, OB_SPACE_SHAPE+ 30)) 
         
-        self.avg_feature = np.reshape(avg_feature, (1, OB_SPACE_SHAPE+1)) 
-        self.std_feature = np.reshape(std_feature,(1, OB_SPACE_SHAPE+1)) 
-        
-        self.train_model_avg_feature = np.tile(self.avg_feature, (self.n_steps*30, 1)) # (nsteps, 181) 
-        self.train_model_std_feature = np.tile(self.std_feature, (self.n_steps*30 , 1)) # (nsteps, 181)
-        
+        self.train_model_avg_feature = np.tile(self.avg_feature, (self.n_steps*30, 1)) 
+        self.train_model_std_feature = np.tile(self.std_feature, (self.n_steps*30 , 1)) 
         
         self.v_in_coef = v_in_coef
         self.v_ex_coef = v_ex_coef
@@ -120,11 +118,13 @@ class A2C_autoregressive_r(ActorCriticRLModel):
         self.momentum = momentum
         self.epsilon = epsilon
         self.lr_schedule = lr_schedule
+        #self.learning_rate = learning_rate
         self.lr_alpha = lr_alpha
         self.lr_beta = lr_beta
         self.tensorboard_log = tensorboard_log
         self.full_tensorboard_log = full_tensorboard_log
 
+        #self.learning_rate_ph = None
         self.LR_ALPHA = None
         self.LR_BETA = None
         self.n_batch = None
@@ -134,10 +134,9 @@ class A2C_autoregressive_r(ActorCriticRLModel):
         self.DIS_V_IN_LAST = None
         self.V_IN = None
         self.A = None
-       
         self.pg_mix_loss = None
         self.pg_ex_loss = None
-        self.v_in_loss  = None
+        self.v_in_loss = None
         self.v_ex_loss = None
         self.entropy = None
         #self.apply_backprop = None
@@ -148,16 +147,18 @@ class A2C_autoregressive_r(ActorCriticRLModel):
         self.learning_rate_schedule = None
         self.summary = None
 
- 
-        super(A2C_autoregressive_r, self).__init__(policy=policy, env=env, verbose=verbose, requires_vec_env=True,
+        ### super(): 1. Allows us to avoid using the base class name explicitly
+        ### 2. Working with Multiple Inheritance
+        super(A2C_autoregressive, self).__init__(policy=policy, env=env, verbose=verbose, requires_vec_env=True,
                                   _init_setup_model=_init_setup_model, policy_kwargs=policy_kwargs,
                                   seed=seed, n_cpu_tf_sess=n_cpu_tf_sess)
 
+        # if we are loading, it is possible the environment is not known, however the obs and action space are known
         if _init_setup_model:
             self.setup_model()
 
     def _make_runner(self) -> AbstractEnvRunner:
-        return A2C_autoregressive_Runner(self.env, self, n_steps=self.n_steps,r_ex_coef=self.r_ex_coef, r_in_coef=self.r_in_coef, gamma=self.gamma)
+        return A2C_autoregressive_runner(self.env, self.reward_func, self, n_steps=self.n_steps,r_ex_coef=self.r_ex_coef, r_in_coef=self.r_in_coef, gamma=self.gamma)
 
     def _get_pretrain_placeholders(self):  #not used
         policy = self.train_model
@@ -167,7 +168,7 @@ class A2C_autoregressive_r(ActorCriticRLModel):
 
     def setup_model(self):    # Part of the init in LIRPG A2C
         with SetVerbosity(self.verbose):
-
+            
             self.graph = tf.Graph()
             with self.graph.as_default():
                 self.set_random_seed(self.seed)
@@ -191,23 +192,25 @@ class A2C_autoregressive_r(ActorCriticRLModel):
 
 
                 self.R_EX = tf.compat.v1.placeholder(tf.float32, [self.n_batch * 30], 'R_EX')
-                
                 self.RET_EX = tf.compat.v1.placeholder(tf.float32, [None], 'RET_EX')
                 self.DIS_V_IN_LAST = tf.compat.v1.placeholder(tf.float32, [self.n_batch*30], 'DIS_V_IN_LAST')
-                
                 self.COEF_MAT = tf.compat.v1.placeholder(tf.float32, [self.n_batch*30, self.n_batch*30], 'COEF_MAT')
                 self.V_IN = tf.compat.v1.placeholder(tf.float32, [self.n_batch *30], 'V_IN')
-                self.V_EX = tf.compat.v1.placeholder(tf.float32, [self.n_batch *30], 'V_IN')
+                self.V_EX = tf.compat.v1.placeholder(tf.float32, [self.n_batch *30], 'V_EX')
+                
 
                 self.A = tf.compat.v1.placeholder(tf.float32, [None, None], 'A') # used 
+               
                 
                 r_in = train_model.r_in 
                 ret_in = tf.squeeze(tf.matmul(self.COEF_MAT, tf.reshape(r_in, [self.n_batch*30, 1])), [1]) + self.DIS_V_IN_LAST
                 ret_mix = self.r_ex_coef * self.RET_EX + self.r_in_coef * ret_in 
+                
+                
+                
                 adv_mix = ret_mix - (self.r_ex_coef * self.V_EX + self.r_in_coef * self.V_IN)  
                 
-               
-                
+                self.check = [r_in, self.R_EX, ret_in, ret_mix, self.RET_EX, adv_mix, self.V_IN, self.V_EX, self.r_ex_coef * self.V_EX + self.r_in_coef * self.V_IN]
                 
                 
                 self.LR_ALPHA = tf.compat.v1.placeholder(tf.float32, [], name="LR_ALPHA")
@@ -223,61 +226,75 @@ class A2C_autoregressive_r(ActorCriticRLModel):
                 self.pg_mix_loss = tf.reduce_mean(adv_mix * neglogpac)
                 self.v_in_loss  = tf.reduce_mean(mse(tf.squeeze(train_model.v_mix), ret_in)) # train_model.v_mix = v_in 
                 
-                self.v_ex_loss = tf.reduce_mean(mse(tf.squeeze(train_model.v_ex), self.RET_EX))
-       
-                
-             
+                self.params = tf_util.get_trainable_vars("policy") # PI and V_IN parameters
+                self.params1 = tf_util.get_trainable_vars("policy")[:7]  # PI only 
 
-                policy_loss = self.pg_mix_loss - self.ent_coef * self.entropy + self.v_in_coef * self.v_in_loss + self.v_ex_coef * self.v_ex_loss 
+                policy_loss = self.pg_mix_loss - self.ent_coef * self.entropy + self.v_in_coef * self.v_in_loss
+                policy_loss1= self.pg_mix_loss - self.ent_coef * self.entropy  
+
                 with tf.compat.v1.variable_scope("policy_info", reuse=False): 
                     tf.compat.v1.summary.scalar('entropy_loss', self.entropy)
                     tf.compat.v1.summary.scalar('pg_mix_loss', self.pg_mix_loss)
                     tf.compat.v1.summary.scalar('v_mix_loss', self.v_in_loss)
                     tf.compat.v1.summary.scalar('policy_loss', policy_loss)
                     
-                self.params = tf_util.get_trainable_vars("policy")  
                 
                 
-                grads = tf.gradients(policy_loss, self.params)   # Using train_model 
                 
-                if self.max_grad_norm is not None:  
+                
+                
+                grads = tf.gradients(policy_loss, self.params)  
+                grads1 = tf.gradients(policy_loss1, self.params1)  
+                
+                if self.max_grad_norm is not None:  # max_grad_norm defines the maximum gradient, needs to be normalized
+                    # Clip the gradients (normalize)
                     grads, _ = tf.clip_by_global_norm(grads, self.max_grad_norm)
-                grads_and_vars = list(zip(grads, self.params))  
-                
+                    grads1, _ = tf.clip_by_global_norm(grads1, self.max_grad_norm)
+                grads_and_vars = list(zip(grads, self.params))  # zip pg and policy params correspondingly, policy_grads_and_vars in LIRPG
+                grads_and_vars1 = list(zip(grads1, self.params1))
+
                 trainer = tf.compat.v1.train.RMSPropOptimizer(learning_rate=self.LR_ALPHA, decay=self.alpha,
                                                     epsilon=self.epsilon, momentum=self.momentum) #Initialize optimizer 
+                trainer1 = tf.compat.v1.train.RMSPropOptimizer(learning_rate=self.LR_ALPHA, decay=self.alpha, 
+                                                    epsilon=self.epsilon, momentum=self.momentum) 
+
+
+                self.policy_train = trainer.apply_gradients(grads_and_vars) 
+                self.policy_train1 = trainer1.apply_gradients(grads_and_vars1) 
                 
-                self.policy_train = trainer.apply_gradients(grads_and_vars)  
-                
-                
-                
-                rmss = [trainer.get_slot(var, 'rms') for var in self.params]  
-                
+                rmss = [trainer.get_slot(var, 'rms') for var in self.params]   
+
+
                 self.params_new = {}
                 for grad, rms, var in zip(grads, rmss, self.params):
                     ms = rms + (tf.square(grad) - rms) * (1 - self.alpha) # wrong in this line
                     self.params_new[var.name] = var - self.LR_ALPHA * grad / tf.sqrt(ms + self.epsilon)  
-                    
                 
+
+
                 self.policy_new = None
                 self.policy_new = train_model.policy_new_fn(self.params_new, self.observation_space, self.action_space, self.n_envs*self.n_steps*30, self.n_steps*30, self.train_model_avg_feature, self.train_model_std_feature)
             
 
-            
-                
-                #INTRINSIC UPDATE
                 self.ADV_EX = tf.compat.v1.placeholder(tf.float32, [None], 'ADV_EX') #(n_steps,)
-               
-              
+                
+                   
+                
+                
                 neglogpac_new = self.policy_new.pd.neglogp(self.A)
                 
                 ratio_new = tf.exp(tf.stop_gradient(neglogpac) - neglogpac_new)
                 self.pg_ex_loss = tf.reduce_mean(-self.ADV_EX * ratio_new)
-                intrinsic_loss = self.pg_ex_loss 
+                self.v_ex_loss = tf.reduce_mean(mse(tf.squeeze(train_model.v_ex), self.RET_EX))
+                intrinsic_loss = self.pg_ex_loss + self.v_ex_coef * self.v_ex_loss 
                 
                 
                 
-                self.intrinsic_params = tf_util.get_trainable_vars("intrinsic")  #A list of trainable variables [var1, var2, ....]
+                self.intrinsic_params = tf_util.get_trainable_vars("intrinsic")   #A list of trainable variables [var1, var2, ....]
+                
+                
+                self.intrinsic_vf_params = tf_util.get_trainable_vars("intrinsic")[6:]
+                
                 
                 
                 
@@ -291,24 +308,34 @@ class A2C_autoregressive_r(ActorCriticRLModel):
             
                 intrinsic_grads = tf.gradients(intrinsic_loss, self.intrinsic_params)
                 
+                intrinsic_grads1 = tf.gradients(self.v_ex_loss, self.intrinsic_vf_params)
                 
         
 
                 if self.max_grad_norm is not None:
                     
                     intrinsic_grads, _ = tf.clip_by_global_norm(intrinsic_grads, self.max_grad_norm)
+                    intrinsic_grads1, _ = tf.clip_by_global_norm(intrinsic_grads1, self.max_grad_norm)
                                         
                 intrinsic_grads_and_vars = list(zip(intrinsic_grads, self.intrinsic_params))
+                intrinsic_grads_and_vars1 = list(zip(intrinsic_grads1, self.intrinsic_vf_params))
                 
 
                 intrinsic_trainer = tf.compat.v1.train.RMSPropOptimizer(learning_rate=self.LR_BETA, decay=self.alpha, 
                                                           epsilon=self.epsilon, momentum=self.momentum)
                 
                 
+                intrinsic_trainer1 = tf.compat.v1.train.RMSPropOptimizer(learning_rate=self.LR_BETA, decay=self.alpha, 
+                                                          epsilon=self.epsilon, momentum=self.momentum)
 
                 self.intrinsic_train = intrinsic_trainer.apply_gradients(intrinsic_grads_and_vars)
                 
+                self.intrinsic_train1 = intrinsic_trainer1.apply_gradients(intrinsic_grads_and_vars1)
                 
+                
+                
+                
+               
                 self.train_model = train_model
                 
                 
@@ -326,9 +353,9 @@ class A2C_autoregressive_r(ActorCriticRLModel):
                 self.summary = tf.compat.v1.summary.merge_all()
             
         
-    def _train_step(self,obs, actions, ob_nx, r_ex, ret_ex, v_ex, v_in, dis_v_in_last, coef_mat, mb_rnn_mask, update,writer=None,update_intrinsic=False ):
+    def _train_step(self,obs, actions, unclipped_actions, ob_nx, r_ex, ret_ex, v_ex, v_in, dis_v_in_last, coef_mat, update,writer=None,update_intrinsic=False ):
 
-       
+
         """
         applies a training step to the model
 
@@ -342,42 +369,47 @@ class A2C_autoregressive_r(ActorCriticRLModel):
         :param writer: (TensorFlow Summary.writer) the writer for tensorboard
         :return: (float, float, float) policy loss, value loss, policy entropy
         """
+        #line 120-136: train() in LIRPG, make the training part (feedforward and retropropagation of gradients)
         #advs = rewards - values
         advs_ex = ret_ex - v_ex
         #cur_lr = None
         for _ in range(len(obs)):
+            #cur_lr = self.learning_rate_schedule.value()
             cur_lr_alpha = self.lr_alpha.value()            
             cur_lr_beta = self.lr_beta.value()
         assert cur_lr_alpha is not None, "Error: the observation input array cannon be empty"
         assert cur_lr_beta is not None, "Error: the observation input array cannon be empty"
         
         
-               
        
-        initial_state = self.step_model.initial_state 
         
         
-        td_map = {self.train_model.X: obs,  self.train_model.A_ALL: actions, self.train_model.X_NX:ob_nx, self.train_model.M: mb_rnn_mask, self.train_model.S: initial_state, 
-                  self.train_model.S_r_in : initial_state , self.train_model.S_vf: initial_state, 
-                  self.policy_new.X:obs, self.policy_new.M: mb_rnn_mask, self.policy_new.S: initial_state, 
-                  self.A: actions,self.V_EX: v_ex, 
-                  self.ADV_EX: advs_ex, self.RET_EX:ret_ex, self.R_EX: r_ex, self.V_IN:v_in, self.DIS_V_IN_LAST:dis_v_in_last,  self.COEF_MAT:coef_mat, 
+        td_map = {self.train_model.X: obs,  self.train_model.A_ALL: actions, self.train_model.X_NX:ob_nx,
+                  self.policy_new.X:obs, 
+                  self.A: unclipped_actions, self.V_EX: v_ex,
+                  self.ADV_EX: advs_ex, self.RET_EX:ret_ex, self.R_EX: r_ex, self.V_IN:v_in, self.DIS_V_IN_LAST:dis_v_in_last, self.COEF_MAT:coef_mat, 
                   self.LR_ALPHA:cur_lr_alpha, self.LR_BETA:cur_lr_beta} 
         
         
+        if update_intrinsic:  
+            pg_ex_loss, pg_mix_loss, value_in_loss, value_ex_loss, policy_entropy, _, _  = self.sess.run(
+                        [self.pg_ex_loss, self.pg_mix_loss, self.v_in_loss, self.v_ex_loss, self.entropy, self.policy_train, self.intrinsic_train ], td_map) 
+            
+        else: 
+                        
+
+            
+            pg_mix_loss, value_ex_loss, policy_entropy, _, _  = self.sess.run(
+                        [self.pg_mix_loss, self.v_ex_loss, self.entropy, self.policy_train1, self.intrinsic_train1 ], td_map) 
+            value_in_loss = 0 
+            pg_ex_loss=0 
+        
+        
+        
+        return pg_ex_loss, pg_mix_loss, value_in_loss, value_ex_loss, policy_entropy
    
         
-        if update_intrinsic:
-            pg_ex_loss, pg_mix_loss, value_in_loss, value_ex_loss, policy_entropy, _, _  = self.sess.run(
-                    [self.pg_ex_loss, self.pg_mix_loss, self.v_in_loss, self.v_ex_loss, self.entropy, self.policy_train, self.intrinsic_train ], td_map) 
         
-        else:                 
-            pg_mix_loss, value_in_loss,value_ex_loss, policy_entropy, _  = self.sess.run(
-                    [self.pg_mix_loss, self.v_in_loss, self.v_ex_loss, self.entropy, self.policy_train ], td_map) 
-            pg_ex_loss =0
-                
-        
-        return pg_ex_loss, pg_mix_loss, value_in_loss, value_ex_loss, policy_entropy 
     
             
             
@@ -404,8 +436,8 @@ class A2C_autoregressive_r(ActorCriticRLModel):
             self.eplenbuf = deque(maxlen=100)
             callback.on_training_start(locals(), globals())
             
+            
             if total_timesteps == 1600 : 
-                
                 self.mb_obs = self.runner.run_for_preproc() 
                 return self 
             
@@ -415,9 +447,11 @@ class A2C_autoregressive_r(ActorCriticRLModel):
             total_timesteps = total_timesteps + (df_len - total_timesteps % df_len ) 
             print("total timesteps: ", total_timesteps ,'epochs' , total_timesteps/df_len )
             
+            
             # A2C INTRINSIC TRAINING 
 
             for update in range(1, total_timesteps // self.n_batch + 1): 
+                "env.day resets to 1 (by a2crunner) whenever a new instance of A2C is called. --> model doesnt start at day 256."
                 
                 if update % 1000 == 0: 
                     print("No. of days/ updates: ", update, "steps", update*30 )
@@ -429,6 +463,8 @@ class A2C_autoregressive_r(ActorCriticRLModel):
                 
                 
                     
+            
+                #print("SELF.NUMTIMESTEPS: ", self.num_timesteps, "RINCOEF", r_in_coef, "REXCOEF", r_ex_coef)
                 
                 
                 # Get mini batch of experiences
@@ -436,17 +472,15 @@ class A2C_autoregressive_r(ActorCriticRLModel):
                 # true_reward is the reward without discount
                 rollout = self.runner.run(callback)
                 
-                
-                
                        
-                obs, actions,ob_nx, r_in, r_ex, ret_ex, ret_in, \
-                v_ex, v_in , last_v_ex, last_v_in, \
-                ep_info, ep_r_ex, ep_r_in, ep_len,mb_rnn_mask = rollout 
+                obs, actions, unclipped_actions, ob_nx, r_in, r_ex, ret_ex, ret_in, \
+                v_ex, v_in, last_v_ex, last_v_in, dones \
+                ep_info, ep_r_ex, ep_r_in, ep_len = rollout 
                 
-               
-                
+              
                 dis_v_in_last = np.zeros([self.n_batch*30], np.float32)
                 coef_mat = np.zeros([self.n_batch*30, self.n_batch*30], np.float32)
+                
                 
                 for i in range(self.n_batch*30):
                     dis_v_in_last[i] = self.gamma ** (self.n_steps*30 - i % (self.n_steps*30) )* last_v_in[0]
@@ -456,14 +490,13 @@ class A2C_autoregressive_r(ActorCriticRLModel):
                         if j > i and j % (self.n_steps*30) == 0:
                             break
                         coef_mat[i][j] = coef
-                        coef *= self.gamma
-                
-                
-                
-                
-                        
-                        
+                        coef *= self.gamma 
+                        if dones[j]:
+                            dis_v_in_last[i] = 0
+                            break
 
+
+                        
                         
                 callback.update_locals(locals())
                 callback.on_rollout_end()
@@ -475,65 +508,45 @@ class A2C_autoregressive_r(ActorCriticRLModel):
                 self.ep_info_buf.extend(ep_info)
                 self.eprexbuf.extend(ep_r_ex)
                 self.eplenbuf.extend(ep_len)
-                
-                
-                
-                
-                pg_ex_loss, pg_mix_loss, value_in_loss, value_ex_loss, policy_entropy  = self._train_step(obs, actions,ob_nx, r_ex, ret_ex, v_ex, v_in,
-                                                                 dis_v_in_last, coef_mat,mb_rnn_mask, self.num_timesteps // self.n_batch, writer,update_intrinsic)
-                
-                
-                
-                policy_loss = pg_mix_loss - self.ent_coef * policy_entropy + self.v_in_coef * value_in_loss + self.v_ex_coef *value_ex_loss 
-                
 
-                intrinsic_loss = pg_ex_loss 
+                pg_ex_loss, pg_mix_loss, value_in_loss, value_ex_loss, policy_entropy = self._train_step(obs, actions,unclipped_actions,ob_nx, r_ex, ret_ex, v_ex, v_in,
+                                                                 dis_v_in_last, coef_mat, self.num_timesteps // self.n_batch, writer,update_intrinsic)
                 
-                if update % 500 == 0:
-                    f=  open(f"/Users/magdalenelim/Desktop/FYP/results/{self.model_type}_loss.csv", 'a', newline='')
-                    to_append3 = [['update', 'pg_mix_loss','pg_ex_loss', 'v_in_loss', 'value_ex_loss', 'policy_entropy', 'policy_loss', 'intrinsic_loss','r_in', 'r_ex', 'last_v_in', 'last_v_ex', 'ret_in', 'ret_ex', 'actions'],  [update, pg_mix_loss,pg_ex_loss, value_in_loss, value_ex_loss, policy_entropy, policy_loss, intrinsic_loss, r_in, r_ex, last_v_in, last_v_ex, ret_in, ret_ex, actions]]                 
-                    csvwriter = csv.writer(f)
-                    csvwriter.writerows(to_append3)
-                    f.close()
-                
+                policy_loss = pg_mix_loss - self.ent_coef *policy_entropy + self.v_in_coef * value_in_loss
 
- 
+                intrinsic_loss =  pg_ex_loss + self.v_ex_coef * value_ex_loss
+                
+               
+            
+
+            
                 n_seconds = time.time() - t_start
                 # Calculate the fps (frame per second)
                 fps = int((update * self.n_batch) / n_seconds)
 
-              
-               
-
+                
         callback.on_training_end()
         return self
 
-    def predict_intrinsic(self, observation, deterministic=False):
-        action = np.zeros(shape=(1,1))  # Reset last_action before starting actions 1-30 
-        hidden_state = self.step_model.initial_state  # reset hidden state before starting actions 1-30 
-        actions = [] 
+    def predict_intrinsic(self, observation, state=None, mask=None, deterministic=False): 
+        action_ph = np.zeros(shape=(1,30)) # Reset action placeholder before starting actions 1-30 
+        
         for j in range(30): 
-            input_ = np.concatenate(( np.copy(observation) , action), axis=1 ).reshape((1,181+1))
-            action, _, _, hidden_state, _, _ = self.step(input_ , hidden_state , hidden_state, mask=np.array([False]))  
-            action = np.clip(action,  -1, 1)
-            actions.append(np.copy(action))
-            
-        
-        actions_all = np.concatenate(actions , axis=1) 
-        return actions_all, hidden_state  
-    
-        
-    
+            input_ = np.concatenate(( np.copy(observation) , action_ph), axis=1 ).reshape((1,211)) # (1,182)
+            new_action, _, _, _, _ = self.step(input_ )
+            new_action = np.clip(new_action,  -1, 1) # (1,1)
+            action_ph[0,j] = new_action
+        return action_ph 
+
+
     def save(self, save_path, cloudpickle=False):
         data = {
             "gamma": self.gamma,
             "n_steps": self.n_steps,
-            #"vf_coef": self.vf_coef,
             "v_mix_coef": self.v_in_coef,
             "v_ex_coef": self.v_ex_coef,
             "ent_coef": self.ent_coef,
             "max_grad_norm": self.max_grad_norm,
-            #"learning_rate": self.learning_rate,
             "lr_alpha": self.lr_alpha,
             "lr_beta": self.lr_beta,
             "alpha": self.alpha,
@@ -558,8 +571,8 @@ class A2C_autoregressive_r(ActorCriticRLModel):
 
 
 
-class A2C_autoregressive_Runner(AbstractEnvRunner):
-    def __init__(self, env, model, n_steps=5,r_ex_coef=1-0.001,nlstm =30, r_in_coef=0.001, gamma=0.99):
+class A2C_autoregressive_runner(AbstractEnvRunner):
+    def __init__(self, env, reward_func, model, n_steps=5,r_ex_coef=1-0.001,nlstm =30, r_in_coef=0.001, gamma=0.99):
         """
         A runner to learn the policy of an environment for an a2c model
 
@@ -569,183 +582,253 @@ class A2C_autoregressive_Runner(AbstractEnvRunner):
         :param gamma: (float) Discount factor
         """
         #line 162-176: needs to modify the parameters in runner; MARKED LINES TO TAKE CARE LATER
-        super(A2C_autoregressive_Runner, self).__init__(env=env, model=model, n_steps=n_steps)
+        super(A2C_autoregressive_runner, self).__init__(env=env, model=model, n_steps=n_steps)
         self.gamma = gamma
-
-        #self.batch_ob_shape = (self.n_envs*self.n_steps,) + env.observation_space.shape
-        #self.obs = env.reset()
-        #self.policy_states = model.initial_state
-        #self.dones = [False for _ in range(self.n_envs)]
+        self.reward_func = reward_func 
         nenv = env.num_envs
         self.r_ex_coef = r_ex_coef
         self.r_in_coef = r_in_coef
         self.ep_r_in = np.zeros([nenv])
         self.ep_r_ex = np.zeros([nenv])
         self.ep_len = np.zeros([nenv])
-        self.states = self.model.initial_state
-        self.nlstm = nlstm 
-        
-        
+        if self.reward_func == 'csr': 
+            self.list1= deque([], maxlen=63)
+
+        if self.reward_func == 'dsr1': 
+            self.init_base_sr_dsr1() 
+
+
+        if self.reward_func =='dsr2': 
+            self.eta = 0.5 
+            self.init_base_sr_dsr2() 
+
+
+    def init_base_sr_dsr1(self): 
+        rews = [] 
+        action_ph = np.zeros(shape=(1,30))
+        self.internal_count = 0
+        for i in range(30*63): 
+            input_ = np.concatenate(( np.copy(self.obs) , action_ph), axis=1 ).reshape((1,OB_SPACE_SHAPE+30)) # (1,182)
+            
+            new_action, _, _, _, _ = self.model.step(input_ )
+            new_action = np.clip(new_action,  -1, 1) # (1,1)
+            action_ph[0,self.internal_count] = new_action 
+            self.internal_count += 1  
+            if self.internal_count == 30: 
+                self.obs, r_ex, self.dones, infos = self.env.step(action_ph)
+                rews.append(r_ex[0])
+                action_ph = np.zeros(shape=(1,30))
+                self.internal_count = 0 
+        self.obs = self.env.reset() 
+        self.list1 = np.array(rews)  # Returns of first quarter. 
+        self.sr = np.mean(self.list1 ) / np.std(self.list1)
+            
+    def init_base_sr_dsr2(self): 
+        rews = [] 
+        action_ph = np.zeros(shape=(1,30))
+        self.internal_count = 0
+        for i in range(30*63): 
+            input_ = np.concatenate(( np.copy(self.obs) , action_ph), axis=1 ).reshape((1,OB_SPACE_SHAPE+30)) # (1,182)
+            
+            new_action, _, _, _, _ = self.model.step(input_ )
+            new_action = np.clip(new_action,  -1, 1) # (1,1)
+            action_ph[0,self.internal_count] = new_action 
+            self.internal_count += 1  
+            if self.internal_count == 30: 
+                self.obs, r_ex, self.dones, infos = self.env.step(action_ph)
+                rews.append(r_ex[0])
+                action_ph = np.zeros(shape=(1,30))
+                self.internal_count = 0 
+        self.obs = self.env.reset() 
+        self.pct = np.array(rews)  # Returns of first quarter. 
+        self.A = np.mean(self.pct )
+        self.B = np.mean (self.pct**2 )
+        self.n = len(self.pct ) 
+
+
     def run_for_preproc(self): # Start of state. 
         mb_obs=[] 
-        last_action = np.zeros(shape=(1,1))
+        action_ph = np.zeros(shape=(1,30))
+        
         
         self.internal_count = 0
-        state = self.model.initial_state 
-        s_vf = self.model.initial_state
-        mb_actions = [] 
-        for i in range(1600 *30): 
+        for i in range(self.n_steps*30): 
             
-            input_ = np.concatenate(( np.copy(self.obs) , last_action), axis=1 ).reshape((1,OB_SPACE_SHAPE+1)) # (1,182)
-            new_action, _, _, state , s_vf, _ = self.model.step(ob= input_, state= state ,  s_vf=s_vf , mask=np.array([False]))
+            input_ = np.concatenate(( np.copy(self.obs) , action_ph), axis=1 ).reshape((1,OB_SPACE_SHAPE+30)) # (1,182)
+            
+            new_action, _, _, _, _ = self.model.step(input_ )
             mb_obs.append(np.copy(input_))
-            last_action = np.clip(new_action,  -1, 1) # (1,1)
-            mb_actions.append(last_action )
-
             
-
+            
+            new_action = np.clip(new_action,  -1, 1) # (1,1)
+            
+            action_ph[0,self.internal_count] = new_action 
+            
             self.internal_count += 1  # NO OF ACTIONS IN STATE SO FAR. 
             
             if self.internal_count == 30: 
-                mb_actions = np.array(mb_actions).reshape((1,30))
-                self.obs, r_ex, self.dones, infos = self.env.step(mb_actions )
-                mb_actions = [] 
+                self.obs, r_ex, self.dones, infos = self.env.step(action_ph)
+                action_ph = np.zeros(shape=(1,30))
                 self.internal_count = 0 
-                state = self.model.initial_state 
-                s_vf = self.model.initial_state
            
              
        
-        mb_obs = np.asarray(mb_obs, dtype=self.obs.dtype).swapaxes(1, 0).reshape( (30*1600 , OB_SPACE_SHAPE+1 )) # (30, 182)
+        mb_obs = np.asarray(mb_obs, dtype=self.obs.dtype).swapaxes(1, 0).reshape( (30*self.n_steps, OB_SPACE_SHAPE+30 )) # (30, 211)
+        
         
         return mb_obs
-        
+
+    
         
 
     def _run(self):
 
-        mb_obs, mb_r_ex, mb_r_in, mb_actions, mb_v_ex, mb_v_in = [],[],[],[],[],[]
+        mb_obs, mb_r_ex, mb_r_in, mb_actions, mb_v_ex, mb_v_in, mb_unclipped = [],[],[],[],[],[], []
         mb_obs_next = []
-        #ep_infos = []
         ep_info, ep_r_ex, ep_r_in, ep_len = [], [], [], []
         
         
         i=0 
         while i < self.n_steps * STOCK_DIM: 
 
-            last_action = np.zeros(shape=(1,1))  # Reset last_action before starting actions 1-30 
-            hidden_state = self.model.step_model.initial_state  # for PI 
-            hidden_state_vex = self.model.step_model.initial_state # for VF
-            hidden_state_rin = self.model.step_model.initial_state  # for R_IN 
+            action_ph = np.zeros(shape=(1,30)) # Reset action placeholder before starting actions 1-30 
             
             for j in range(STOCK_DIM): 
-                input_ = np.concatenate(( np.copy(self.obs) , last_action), axis=1 ).reshape((1,OB_SPACE_SHAPE+1)) # (1,182)
+                input_ = np.concatenate(( np.copy(self.obs) , action_ph), axis=1 ).reshape((1,OB_SPACE_SHAPE+30)) # (1,182)
                 
-                new_action, v_ex, v_in, hidden_state, hidden_state_vex, _ = self.model.step(input_ , hidden_state , hidden_state_vex , mask=np.array([False]))  
+                new_action, v_ex, v_in, _, _ = self.model.step(input_ )
+                
                 mb_obs.append(np.copy(input_))
+
+                mb_unclipped.append(new_action)  # unclipped
+                new_action = np.clip(new_action,  -1, 1) # (1,1)
+                mb_actions.append(new_action)  # clipped 
                 
-                 
+
                 
+                action_ph[0,j] = new_action 
                 
-                last_action = np.clip(new_action,  -1, 1) # (1,1)
-                mb_actions.append(last_action)  
-                mb_v_in.append(v_in)
-                mb_v_ex.append(v_ex) # (1,) 
+                mb_v_in.append(v_in) 
+                mb_v_ex.append(v_ex)
                 
-        
-         
-                
+               
                 if j < STOCK_DIM-1:
                     r_ex = np.array([0])
                     mb_r_ex.append(r_ex) 
-                    next_input_ = np.concatenate(( np.copy(self.obs) , last_action ), axis=1 ).reshape((1,OB_SPACE_SHAPE+1))
-                    mb_obs_next.append(next_input_ )
-                    r_in, hidden_state_rin = self.model.intrinsic_reward(ob= input_ , ac=new_action,ob_nx=next_input_ , state = hidden_state_rin , mask=np.array([False])) 
+                    next_input_ = np.concatenate(( np.copy(self.obs) , action_ph), axis=1 ).reshape((1,OB_SPACE_SHAPE+30))
+                    r_in = self.model.intrinsic_reward(ob= input_ , ac=new_action , ob_nx=next_input_ ) 
                     mb_r_in.append(r_in)
+                    mb_obs_next.append(next_input_ )
                     
-                    
-                elif j == STOCK_DIM - 1: 
-                    actions_all = np.concatenate(mb_actions[-30:] , axis=1) 
-                    self.obs, r_ex, self.dones, infos = self.env.step(actions_all )
+                elif j == STOCK_DIM - 1:    
+                    old_obs =np.copy( self.obs)                  
+                    self.obs, r_ex, self.dones, infos = self.env.step(action_ph)
                     if self.dones: 
-                        mb_obs,mb_actions, mb_v_in,mb_v_ex ,mb_r_ex, mb_obs_next, mb_r_in = [], [] , [] , [],[], [] ,[]
-                        break 
+                        r_ex= np.array([0]) 
+                        mb_r_ex.append(r_ex) 
+                        next_input_ = np.concatenate(( old_obs , action_ph), axis=1 ).reshape((1,OB_SPACE_SHAPE+30))
+                        mb_obs_next.append(next_input_ )
+                        r_in = self.model.intrinsic_reward(ob= input_ , ac=new_action , ob_nx=next_input_ ) 
+                        mb_r_in.append(r_in)
+                        last_v_ex, last_v_in = self.model.value(ob =next_input_ ) 
+                        if self.reward_func == 'csr': 
+                            self.list1 = deque([], maxlen=63)
+
                     
-                    mb_r_ex.append(r_ex) 
-                    last_action = np.zeros(shape=(1,1)) 
-                    next_input_ = np.concatenate(( np.copy(self.obs) , last_action ), axis=1 ).reshape((1,OB_SPACE_SHAPE+1))
-                    mb_obs_next.append(next_input_ )
-                    
-                    r_in, hidden_state_rin = self.model.intrinsic_reward(ob= input_ , ac=new_action, ob_nx=next_input_ , state = hidden_state_rin , mask=np.array([False])) 
-                    mb_r_in.append(r_in)
-                    
-                    
-                    last_v_ex, last_v_in , _ = self.model.value(ob =next_input_ , s=hidden_state, s_vf = hidden_state_vex ,mask=np.array([False]) ) 
-                    
+                    else: 
+                        if self.reward_func in ['profit','logreturn']:
+                             mb_r_ex.append(r_ex) 
+
+                        elif self.reward_func == 'csr': 
+                            self.list1.append(float(r_ex[0]))
+                            if len(self.list1) > 1: 
+                                if stdev(self.list1) != 0: 
+                                    sr = (252 ** 0.5) * mean(self.list1) / stdev(self.list1)
+                                else: # stdev returns zero ie. no trading 
+                                    sr = 0 
+                            else: 
+                                sr = (252 ** 0.5) * mean(self.list1) 
+                            mb_r_ex.append( np.array([sr]) ) 
+                        
+                        elif self.reward_func == 'dsr1': 
+                            # Difference in sharpe ratio 
+                            self.list1 = np.append( r_ex, self.list1 )
+                            new_sr = np.mean(self.list1)/np.std(self.list1)
+                            change_sr = new_sr - self.sr 
+                            self.sr = new_sr 
+                            mb_r_ex.append( np.array([change_sr*100] ) )
+                        elif self.reward_func == 'dsr2': 
+                            # Differential Sharpe ratio
+                            delta_A = r_ex - self.A  
+                            delta_B = r_ex**2 - self.B 
+                            Dt = (self.B*delta_A - 0.5*self.A*delta_B ) / ( (self.B- self.A**2)**(3/2))
+                            self.A = ( self.n*self.A + r_ex )/ (self.n+1)
+                            self.B = (self.n*self.B + r_ex**2 ) / (self.n+1)
+                            self.n +=1 
+                            mb_r_ex.append( Dt*self.eta  ) 
+
+                        action_ph = np.zeros(shape=(1,30))
+                        next_input_ = np.concatenate(( np.copy(self.obs) , action_ph), axis=1 ).reshape((1,OB_SPACE_SHAPE+30))
+                        mb_obs_next.append(next_input_ )
+                        r_in = self.model.intrinsic_reward(ob= input_ , ac=new_action , ob_nx=next_input_ ) 
+                        mb_r_in.append(r_in)
+                        last_v_ex, last_v_in = self.model.value(ob =next_input_ ) 
+                
                     i+= STOCK_DIM 
                     
                     self.model.num_timesteps += self.n_envs 
-
     
-            
-        mb_rnn_mask = [0] * (self.n_steps*STOCK_DIM ) 
-        for i in range(0, len(mb_rnn_mask), 30):
-            mb_rnn_mask[i] = 1 
-        
        
-        
-       
-        mb_obs = np.asarray(mb_obs, dtype=self.obs.dtype).swapaxes(1, 0).reshape( (self.n_steps*STOCK_DIM, 182 )) # (30, 182)
-        mb_obs_nx = np.asarray(mb_obs_next, dtype=self.obs.dtype).swapaxes(1, 0).reshape((self.n_steps*STOCK_DIM , OB_SPACE_SHAPE+1))# CORRECT ORDER (30, )
-        
+        mb_obs = np.asarray(mb_obs, dtype=self.obs.dtype).swapaxes(1, 0).reshape( (self.n_steps*STOCK_DIM, OB_SPACE_SHAPE+30 )) 
+        mb_obs_nx = np.asarray(mb_obs_next, dtype=self.obs.dtype).swapaxes(1, 0).reshape((self.n_steps*STOCK_DIM , OB_SPACE_SHAPE+30))
         
         mb_r_ex = np.asarray(mb_r_ex, dtype=np.float32).swapaxes(1, 0) 
         mb_r_in = np.asarray(mb_r_in, dtype=np.float32).swapaxes(1, 0)
-
         
-        
+        mb_unclipped = np.asarray(mb_unclipped, dtype=self.env.action_space.dtype).swapaxes(0, 1) # ( 30, 1)
         mb_actions = np.asarray(mb_actions, dtype=self.env.action_space.dtype).swapaxes(0, 1) # ( 30, 1)
         mb_v_ex = np.asarray(mb_v_ex, dtype=np.float32).swapaxes(1, 0) 
         
         
         
         mb_v_in = np.asarray(mb_v_in, dtype=np.float32).swapaxes(1, 0)
-        
-        
-                
-        mb_ret_ex, mb_ret_in = np.zeros(mb_r_ex.shape), np.zeros(mb_r_in.shape)
+    
                         
+        mb_ret_ex, mb_ret_in = np.zeros(mb_r_ex.shape), np.zeros(mb_r_in.shape)
         
         # discount/bootstrap off value fn
             
             
         
-        
         for n, (r_ex, r_in, v_ex, v_in) in enumerate(zip(mb_r_ex, mb_r_in, last_v_ex, last_v_in)): 
             r_ex, r_in = r_ex.tolist(), r_in.tolist() 
-        
-            dones = [False] * 30 
-            ret_ex = discount_with_dones(r_ex + [0.99*v_ex], dones + [0], 1)[:-1] 
-            ret_in = discount_with_dones(r_in+ [v_in ], dones + [0], self.gamma )[:-1]
-         
+            dones = [False] * 29 + [ self.dones[0] ]  
+            if dones[-1] == 0:   # last state not terminal        
+                ret_ex = discount_with_dones(r_ex + [0.99*v_ex], dones + [0], 1)[:-1] 
+                ret_in = discount_with_dones(r_in+ [v_in ], dones + [0], self.gamma )[:-1]   # Ret_in 
+            else: # last state terminal. 
+                ret_ex = discount_with_dones(r_ex, dones, 1 )
+                ret_in = discount_with_dones(r_in, dones, self.gamma)
             
-            mb_ret_ex[n], mb_ret_in[n] = ret_ex, ret_in
-            
+            #mb_rewards[n] = rewards
+            mb_ret_ex[n], mb_ret_in[n] = ret_ex, ret_in 
+
+
             
        
-
+        mb_dones = [False] * 29 + [ self.dones[0] ]   
+        mb_dones = np.asarray(mb_dones, dtype=np.bool_) # (30,) array 
         mb_r_ex = mb_r_ex.flatten()
         mb_r_in = mb_r_in.flatten()
         mb_ret_ex = mb_ret_ex.flatten()
         mb_ret_in = mb_ret_in.flatten()
+        mb_unclipped = mb_unclipped.reshape(-1, *mb_unclipped.shape[2:])
         mb_actions = mb_actions.reshape(-1, *mb_actions.shape[2:])
         mb_v_ex = mb_v_ex.reshape(-1, *mb_v_ex.shape[2:])
         mb_v_in = mb_v_in.reshape(-1, *mb_v_in.shape[2:])
-        
-
-        
-        return mb_obs, mb_actions,mb_obs_nx,mb_r_in, mb_r_ex, mb_ret_ex, mb_ret_in, \
-               mb_v_ex, mb_v_in, last_v_ex, last_v_in, \
-               ep_info, ep_r_ex, ep_r_in, ep_len ,mb_rnn_mask
-
     
+        
+        return mb_obs, mb_actions, mb_unclipped, mb_obs_nx,mb_r_in, mb_r_ex, mb_ret_ex, mb_ret_in, \
+               mb_v_ex, mb_v_in, last_v_ex, last_v_in, mb_dones, \
+               ep_info, ep_r_ex, ep_r_in, ep_len 
+        
