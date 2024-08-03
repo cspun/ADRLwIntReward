@@ -403,7 +403,7 @@ def run_once(path, reward_func='profit', preproc=True, timesteps=6000, v_in_coef
 def run(): 
     path = "done_data.csv"
     for reward_func in ['profit','logreturn', 'csr','dsr1','dsr2']: 
-        for seed in [6280, 43136, 85721,17913,51104,35269,8182,40124,5921,3402,9391,6574,43523,10672,75927]: 
+        for seed in [6280,43136,85721,17913,51104,35269,8182, 40124, 5921,7921, 9391,6574, 43523, 10672,75927, 90121, 4342]:   
             run_once(path,reward_func= reward_func, seed=seed ) 
             
         
