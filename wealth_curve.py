@@ -9,7 +9,7 @@ import pandas as pd
 import numpy as np
 import quantstats as qs
 #import riskfolio as rp
-from meanvar import compute_meanvar
+from meanvar import compute_meanvar 
 
 import matplotlib
 import matplotlib.pyplot as plt 
