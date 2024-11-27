@@ -12,6 +12,7 @@ publisher = {Association for Computing Machinery}, <br>
 address = {New York, NY, USA}, <br>
 url = {https://doi.org/10.1145/3677052.3698670}, <br>
 doi = {10.1145/3677052.3698670}, <br>
+abstract = {The recent success of deep reinforcement learning (DRL) in sequential learning tasks involving high-dimensional state spaces has sparked the interest of the finance research community. In portfolio optimization, mainstream research often overlooks the important question of optimal reward design, in favor of algorithm design. In this work, we focus on the former question, exploring different external reward functions in combination with reward-transforming internal systems. We put forth a novel strategy that combines two DRL frameworks: learned intrinsic rewards and autoregressive architectures, allowing individual intrinsic rewards to be learned for each dimension of the action space. We back-test each strategy using real financial data of 30 Dow Jones stocks over multiple years, and demonstrate that learned individual intrinsic rewards lead to the best performance that is robust across different training objectives.}, <br>
 booktitle = {Proceedings of the 5th ACM International Conference on AI in Finance}, <br>
 pages = {353–360}, <br>
 numpages = {8}, <br>
