@@ -2,8 +2,9 @@
 
 This repository provides the full codes and supplementary materials for the paper: "Autoregressive DRL with Learned Intrinsic Rewards for Portfolio Optimisation"
 
-If you find any information from this repo helpful, please cite our work: <small>
-> @inproceedings{10.1145/3677052.3698670, <br>
+If you find any information from this repo helpful, please cite our work:
+```
+@inproceedings{10.1145/3677052.3698670, <br>
 author = {Lim, Magdalene Hui Qi and Lesmana, Nixie S and Pun, Chi Seng}, <br>
 title = {Autoregressive DRL with Learned Intrinsic Rewards for Portfolio Optimisation}, <br>
 year = {2024}, <br>
@@ -20,6 +21,7 @@ keywords = {Autoregressive model, Empirical finance, Intrinsic reward, Markov de
 location = {Brooklyn, NY, USA}, <br>
 series = {ICAIF '24} <br>
 }
+```
 
 
 
